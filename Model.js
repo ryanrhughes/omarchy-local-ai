@@ -158,9 +158,10 @@ function homeView(s, ui) {
   return { title: "LOCAL AI", version: s.version, rows: rows }
 }
 
-// Two tabs: home (your activity, what runs, your pinned models) and models (every model, to find, download, pin)
+// Two tabs, each with one job: home is what runs and what is on this machine to start now; get models is every other
+// model that fits, to download
 function tabs(ui) {
-  return { type: "tabs", items: [{ label: "home", on: ui.view !== "models", action: "home" }, { label: "models", on: ui.view === "models", action: "models" }] }
+  return { type: "tabs", items: [{ label: "home", on: ui.view !== "models", action: "home" }, { label: "get models", on: ui.view === "models", action: "models" }] }
 }
 
 // a card's name short enough for a table cell: RTX 3090, B70, CPU
@@ -255,6 +256,9 @@ function catalog(s) {
         action: d ? "more|" + d.id : short_ ? "" : n > 1 ? "group|" + kd.hw + "|" + n + "|" + r.id : "kind|" + kd.hw + "|" + (kd.free[0] || kd.keys[0]) + "|" + r.id })
     })
   })
+  // how smart each is against the smartest here, in five steps
+  var top = Math.max.apply(null, out.map(function(c) { return c.aa || 0 }).concat([1]))
+  out.forEach(function(c) { c.pips = c.aa != null ? Math.max(1, Math.round(c.aa / top * 5)) : 0 })
   // two that would read the same (a model, its build, its card) are told apart by the first thing that differs between
   // them: the detail their format carries (55 GB RAM, experts in RAM), the RAM they take, their context, their engine
   var ways = [function(c) { return ((c.format || "").match(/\(([^,)]+)/) || [])[1] || "" },
@@ -288,6 +292,11 @@ function mrow(c) {
     right = "↓ " + (c.dl.percent > 0 ? c.dl.percent + "%" : "…")
     progress = c.dl.percent > 0 ? c.dl.percent : -1
   } else right = tps(c.speed)
+  // what it is to you, drawn as marks: how smart against the rest here, its context, what it takes on disk and whether
+  // that is here, a download, or here but for a part; what it can do
+  var info = !c.fits ? null : { pips: c.pips, ctx: c.ctx ? ctx(c.ctx) : "", size: c.size ? gb(c.size) : "",
+    disk: c.onDisk ? "here" : c.part > 0 ? "part" : "download", rest: c.part > 0 && !c.onDisk ? gb(c.size * (100 - c.part) / 100) : "",
+    on: c.kinds > 1 || c.n > 1 ? c.on : "", caps: ["vision", "tools", "reasoning"].filter(function(k) { return c.caps[k] }) }
   if (!c.fits) meta.push(c.unfit)
   else {
     if (c.aa != null) meta.push("smart " + Math.round(c.aa))
@@ -301,7 +310,7 @@ function mrow(c) {
     meta = meta.concat(caps)
   }
   return { type: "mrow", family: c.family || "", title: c.title, quant: c.variant ? c.quant + " · " + c.variant : c.quant, tags: tags, right: right,
-    meta: meta, alert: !c.fits, here: c.onDisk, live: live, progress: progress, on: c.on, act: quick(c),
+    meta: meta, info: info, alert: !c.fits, here: c.onDisk || c.part > 0, live: live, progress: progress, on: c.on, act: quick(c),
     // dim: nothing to do with it here now, neither start it nor switch to it
     dim: !c.d && (!c.fits || (!c.free && !c.swap)), action: c.action, id: c.id }
 }
@@ -312,6 +321,8 @@ function quick(c) {
   if (c.d) return c.d.state === "ready" ? { label: "Open ›", action: "open|" + c.d.id } : null
   if (c.dl && c.dl.state === "download") return { label: "Cancel", action: "download|" + c.id + "|off" }
   if (!c.fits) return null
+  // one not here is downloaded first, on its own; Start (or Switch) once it is
+  if (!here(c)) return { label: "Download", action: "download|" + c.id }
   if (c.free && c.run) return { label: "Start ›", action: c.run }
   if (c.swap) return { label: "Switch ›", action: c.swap }
   return null
@@ -353,40 +364,46 @@ function manage(c) {
   var items = []
   if (c.d && c.d.state === "ready") items.push({ label: "Open ›", action: "open|" + c.d.id, primary: true }, { label: "Stop", action: stop(c.d), danger: true })
   else if (c.d) items.push({ label: "Stop", action: stop(c.d), danger: true })
+  // one not here downloads first; Start downloads and then starts it
+  else if (c.fits && !here(c) && !c.dl) items.push({ label: "Download", action: "download|" + c.id, primary: true },
+    c.free && c.run ? { label: "Download and start ›", action: c.run } : c.swap ? { label: "Download and switch ›", action: c.swap } : null)
   else if (c.fits && c.free && c.run) items.push({ label: "Start ›", action: c.run, primary: true })
   else if (c.swap) items.push({ label: "Switch to this ›", action: c.swap, primary: true })
   if (c.beside) items.push({ label: "Run alongside", action: c.beside })
   if (!c.d) {
     if (c.dl && c.dl.state === "download") items.push({ label: "Cancel download", action: "download|" + c.id + "|off" })
     else if (c.downloaded || c.onDisk) items.push({ label: "Remove download", action: "forget|" + c.id, danger: true })
-    else if (c.fits) items.push({ label: c.dl || c.part ? "Resume download" : "Download", action: "download|" + c.id })
+    else if (c.fits && (c.dl || c.part)) items.push({ label: "Resume download", action: "download|" + c.id })
   }
   // a model on this machine is on home already; one that is not can be pinned there to try later
   if (!c.d && !c.dl && !c.downloaded && !c.onDisk) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
   items.push({ label: "Details ›", action: c.action })
-  var note = [blurb(c), state(c), c.beside ? c.besideNote : ""].filter(Boolean).join("\n")
-  return { type: "links", note: note, items: items.filter(function(x) { return x.action !== undefined && x.action !== "" }) }
+  // the marks on its row in words
+  var can = [c.caps.vision ? "sees images" : "", c.caps.tools ? "calls tools" : "", c.caps.reasoning ? "thinks before it answers" : ""].filter(Boolean)
+  var said = (c.aa != null ? "smart " + Math.round(c.aa) + " on the Artificial Analysis index" : "") + (can.length ? (c.aa != null ? "; " : "") + can.join(", ") : "")
+  var note = [blurb(c), said, state(c), c.beside ? c.besideNote : ""].filter(Boolean).join("\n")
+  return { type: "links", note: note, items: items.filter(function(x) { return x && x.action !== undefined && x.action !== "" }) }
 }
-// Home's models, below what runs: those ready to start (here, all or nearly all, not running), then those you pinned to
-// try; until there are any, the recommended ones. Every other model is a tab away.
+// Home's models, below what runs: those on this machine to start now; the best pick for it when that is not here yet;
+// those pinned to try. Until any is here, the recommended ones. Every other model is on get models.
 function pinned(s, ui) {
   var all = catalog(s), by = ui.sort || "smart"
   var ready = all.filter(function(c) { return !c.d && (here(c) || (c.dl && c.dl.state === "download")) }).sort(sorter(by))
-  var pins = all.filter(function(c) { return !c.d && !here(c) && !c.dl && c.pin >= 0 }).sort(function(a, b) { return a.pin - b.pin })
+  var rec = all.filter(function(c) { return c.rec && c.fits && !c.d && !here(c) && !c.dl })
+  var pins = all.filter(function(c) { return !c.d && !here(c) && !c.dl && c.pin >= 0 && rec.indexOf(c) < 0 }).sort(function(a, b) { return a.pin - b.pin })
+  var running = (s.deployments || []).some(function(d) { return d.state !== "error" })
   var rows = []
-  if (ready.length) rows = rows.concat([{ type: "sec", label: "READY TO START", note: "on this machine" }], list(ready, ui))
-  if (pins.length) rows = rows.concat([{ type: "sec", label: "PINNED", note: "downloads when started" }], list(pins, ui))
-  // until anything is here, the recommended ones; a model that runs or starts is enough (one that crashed is not)
-  if (!ready.length && !pins.length && !(s.deployments || []).some(function(d) { return d.state !== "error" })) {
-    var rec = all.filter(function(c) { return c.rec && c.fits })
-    rows = rows.concat([{ type: "sec", label: "RECOMMENDED" }], rec.length ? list(rec, ui)
-      : [{ type: "links", note: "Nothing fits this machine yet; the models tab says what each one needs.", items: [{ label: "Models ›", action: "models" }] }])
-  }
-  // the rest of the catalog, a click away
-  var more = all.filter(function(c) { return c.fits && !c.d && !here(c) && c.pin < 0 }).length
-  if (more) rows.push({ type: "field", icon: "down", label: more + (more === 1 ? " more model fits" : " more models fit") + " this machine", value: "browse", action: "models" })
+  if (ready.length) rows = rows.concat([{ type: "sec", label: "READY TO START", note: "on this machine", items: sortItems(by) }], list(ready, ui))
+  if (rec.length) rows = rows.concat([{ type: "sec", label: ready.length || running ? "BEST FOR THIS MACHINE" : "RECOMMENDED", note: "download to start" }], list(rec, ui))
+  if (pins.length) rows = rows.concat([{ type: "sec", label: "PINNED", note: "download to start" }], list(pins, ui))
+  if (!ready.length && !rec.length && !pins.length && !running)
+    rows.push({ type: "links", note: "Nothing fits this machine yet; get models says what each one needs.", items: [{ label: "Get models ›", action: "models" }] })
+  // the rest of what fits, a tab away
+  var more = all.filter(function(c) { return c.fits && !c.d && !here(c) && rec.indexOf(c) < 0 && pins.indexOf(c) < 0 }).length
+  if (more) rows.push({ type: "field", icon: "download", label: more + (more === 1 ? " more model fits" : " more models fit") + " this machine", value: "get models", action: "models" })
   return rows
 }
+function sortItems(by) { return SORTS.map(function(x) { return { label: x, on: x === by, action: x === by ? "" : "sort|" + x } }) }
 // What a recipe this version no longer offers left behind (an update withdrew it): each folder with its size and
 // Remove, and each download that will not finish with Remove, so an update never strands gigabytes
 function unoffered(s) {
@@ -403,24 +420,23 @@ function unoffered(s) {
   })
   return rows
 }
-// the models tab: a search line (type anywhere), how to sort, then every model that fits, those this machine is too
-// small for, and those tested only on other cards so far; each row opens in place to start, switch to, download,
-// remove or pin it
+// Get models: a search line (type anywhere) over every model, those here marked as such; without a search, every
+// model that fits and is not here yet, to download, then those this machine is too small for, and those tested only on
+// other cards so far. Each row opens in place to download, pin or see it.
 function modelsTab(s, ui) {
   var all = catalog(s), q = (ui.query || "").trim().toLowerCase(), by = ui.sort || "smart"
   var rows = [{ type: "search", query: ui.query || "", hint: "type to search " + all.length + (all.length === 1 ? " model" : " models") }]
   if (q) {
     var hit = all.filter(function(c) { return matches(c, q) }).sort(function(a, b) { return (b.fits - a.fits) || sorter(by)(a, b) })
     rows.push({ type: "sec", label: "MATCHES" })
-    return rows.concat(hit.length ? list(hit, ui) : [{ type: "links", note: "No model here matches “" + ui.query.trim() + "”. New ones arrive with Local AI updates.", items: [] }])
+    return rows.concat(hit.length ? list(hit, ui) : [{ type: "links", note: "No model here matches \u201c" + ui.query.trim() + "\u201d. New ones arrive with Local AI updates.", items: [] }])
   }
-  // what runs or is here, then what fits and needs a download first, each sorted the same way
-  var ready = all.filter(function(c) { return c.d || here(c) || (c.dl && c.dl.state === "download") }).sort(sorter(by))
-  var get = all.filter(function(c) { return c.fits && ready.indexOf(c) < 0 }).sort(sorter(by)), big = all.filter(function(c) { return !c.fits && !c.d })
-  var sorts = SORTS.map(function(x) { return { label: x, on: x === by, action: x === by ? "" : "sort|" + x } })
-  if (!ready.length && !get.length) rows.push({ type: "sec", label: "NOTHING FITS YET" })
-  if (ready.length) rows = rows.concat([{ type: "sec", label: "READY TO START", note: "on this machine", items: sorts }], list(ready, ui))
-  if (get.length) rows = rows.concat([{ type: "sec", label: "DOWNLOAD FIRST", note: get.length + (get.length === 1 ? " model" : " models"), items: ready.length ? null : sorts }], list(get, ui))
+  var get = all.filter(function(c) { return c.fits && !c.d && !here(c) && !(c.dl && c.dl.state === "download") }).sort(sorter(by))
+  var big = all.filter(function(c) { return !c.fits && !c.d })
+  var have = all.length - get.length - big.length
+  rows.push({ type: "sec", label: get.length ? "TO DOWNLOAD" : "NOTHING MORE TO DOWNLOAD", note: get.length ? "fits this machine" : "", items: get.length ? sortItems(by) : null })
+  rows = rows.concat(list(get, ui))
+  if (have) rows.push({ type: "field", icon: "disk", label: have + (have === 1 ? " model is" : " models are") + " on this machine", value: "home", action: "home" })
   if (big.length) {
     rows.push({ type: "field", label: "too big for this machine", value: String(big.length), drop: true, open: ui.big, action: "big" })
     if (ui.big) rows = rows.concat(list(big.sort(sorter(by)), ui))
@@ -833,7 +849,7 @@ function build(s, ui) {
   // A page has one way back, up to where it belongs: a model's page to the tab it was opened from, the folder to what
   // it is for, every other page to home
   if (v.back) v.up = ui.view === "folder" ? (ui.id ? { label: "model", action: "more|" + ui.id } : { label: "agents", action: "agents" })
-    : /^(run|kind|group)$/.test(ui.view) && ui.from === "models" ? { label: "models", action: "models" } : { label: "home", action: "home" }
+    : /^(run|kind|group)$/.test(ui.view) && ui.from === "models" ? { label: "get models", action: "models" } : { label: "home", action: "home" }
   // usage reporting is off until you choose: home asks once, and either answer is kept and ends the question; No thanks
   // comes first, so the first keyboard focus never turns it on
   if (s.reporting === "unset" && (!ui.view || ui.view === "home"))

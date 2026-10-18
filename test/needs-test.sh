@@ -147,7 +147,7 @@ pass "every reason is given at once, and a recipe without needs fits anywhere"
 jq '.hardware[].recipes |= map(. + {needs: {host_ram_gb: 96, disk_gb: 1}})' "$TMP/plugin/recipes.json" >"$TMP/r" && mv "$TMP/r" "$TMP/plugin/recipes.json"
 "$CLI" snapshot >"$TMP/snap.json"
 if command -v node >/dev/null; then
-  [[ $(view home | jq -r '[.[] | select(.type == "links") | .note] | join("")') == "Nothing fits this machine yet; the models tab says what each one needs." ]] ||
+  [[ $(view home | jq -r '[.[] | select(.type == "links") | .note] | join("")') == "Nothing fits this machine yet; get models says what each one needs." ]] ||
     fail "all unfit" "$(view home)"
   [[ $(view home | jq -r '[.[] | select(.type == "trow")] | length') == 0 ]] || fail "all unfit home" "$(view home)"
   rows=$(view kind rtx-3090-24gb)

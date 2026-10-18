@@ -27,7 +27,8 @@ Panel {
   readonly property string mono: bar ? bar.fontFamily : Style.font.family
   // Nerd Font glyphs for the icon names Model.js uses
   readonly property var glyphs: ({ gpu: 0xf08ae, memory: 0xf035b, temp: 0xf050f, context: 0xf09aa, weights: 0xf01a7, vision: 0xf06d0,
-    speed: 0xf140c, tokens: 0xf04a0, agent: 0xf07b7, folder: 0xf0256, machine: 0xf0379, tailnet: 0xf0317, check: 0xf012c, down: 0xf0140, up: 0xf0143, full: 0xf0293, unfull: 0xf0294, more: 0xf01d8, settings: 0xf0493 })
+    speed: 0xf140c, tokens: 0xf04a0, agent: 0xf07b7, folder: 0xf0256, machine: 0xf0379, tailnet: 0xf0317, check: 0xf012c, down: 0xf0140, up: 0xf0143, full: 0xf0293, unfull: 0xf0294, more: 0xf01d8, settings: 0xf0493,
+    smart: 0xf09d1, see: 0xf0208, tools: 0xf05b7, reasoning: 0xf0335, disk: 0xf02ca, download: 0xf01da })
   function glyph(name) { return glyphs[name] ? String.fromCodePoint(glyphs[name]) : "" }
 
   // Four tones, each picked by the APCA contrast it must reach on a card (Model.tones): ink for what matters
@@ -798,7 +799,8 @@ Panel {
               id: mr
               readonly property real lead: Style.space(24)
               readonly property real tail: Style.space(18)
-              readonly property color nameTone: r.dim ? Util.alpha(root.labelTone, 0.8) : root.ink
+              // ready to start in ink; one still to download a step quieter; one this machine cannot run quieter still
+              readonly property color nameTone: r.dim ? Util.alpha(root.labelTone, 0.8) : r.here || r.live ? root.ink : root.valueTone
               readonly property bool pointed: mrHover.hovered && !!r.act
               height: mrTop.y + mrTop.height + Style.space(3) + mrMeta.implicitHeight + Style.space(9) + (mrBar.visible ? Style.space(3) : 0)
               HoverHandler { id: mrHover }
@@ -826,7 +828,8 @@ Panel {
                 x: root.gutter + mr.lead
                 y: Style.space(9)
                 width: mr.width - x - root.gutter - mr.tail
-                height: Math.max(mrTitle.implicitHeight, mrAct.visible ? mrAct.height : 0)
+                // as tall as the button that replaces the speed when pointed at, shown or not, so pointing moves nothing
+                height: Math.max(mrTitle.implicitHeight, mrAct.implicitHeight)
                 Label {
                   id: mrRight
                   visible: !mr.pointed
@@ -837,10 +840,11 @@ Panel {
                 }
                 Btn {
                   id: mrAct
-                  visible: mr.pointed
+                  opacity: mr.pointed ? 1 : 0
+                  enabled: mr.pointed
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  label: r.act ? r.act.label : ""
+                  label: r.act ? r.act.label : " "
                   action: r.act ? r.act.action : ""
                   primary: true
                   small: true
@@ -880,16 +884,79 @@ Panel {
                   }
                 }
               }
-              Label {
+              Item {
                 id: mrMeta
                 x: mrTop.x
                 anchors.top: mrTop.bottom
                 anchors.topMargin: Style.space(3)
                 width: mrTop.width
-                elide: Text.ElideRight
-                text: (r.meta || []).join(" · ")
-                color: r.alert ? root.alertTone : root.labelTone
-                font.pixelSize: Style.font.bodySmall
+                implicitHeight: mrMetaText.implicitHeight
+                height: implicitHeight
+                // no marks to draw (too big, tested elsewhere): its words
+                Label {
+                  id: mrMetaText
+                  visible: !r.info
+                  width: parent.width
+                  elide: Text.ElideRight
+                  text: (r.meta || []).join(" · ")
+                  color: r.alert ? root.alertTone : root.labelTone
+                  font.pixelSize: Style.font.bodySmall
+                }
+                // how smart against the rest here, its context, what it takes on disk and whether that is here
+                Row {
+                  visible: !!r.info
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(14)
+                  Row {
+                    visible: !!r.info && r.info.pips > 0
+                    spacing: Style.space(5)
+                    anchors.verticalCenter: parent.verticalCenter
+                    Label { text: root.glyph("smart"); color: root.labelTone; font.pixelSize: Style.font.bodySmall; anchors.verticalCenter: parent.verticalCenter }
+                    Row {
+                      spacing: Style.space(2)
+                      anchors.verticalCenter: parent.verticalCenter
+                      Repeater {
+                        model: 5
+                        Rectangle {
+                          required property int index
+                          width: Style.space(5); height: Style.space(8); radius: 1
+                          color: r.info && index < r.info.pips ? root.valueTone : root.ruleTone
+                        }
+                      }
+                    }
+                  }
+                  Row {
+                    visible: !!r.info && !!r.info.ctx
+                    spacing: Style.space(4)
+                    Label { text: root.glyph("context"); color: root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    Label { text: r.info ? r.info.ctx : ""; color: root.labelTone; font.pixelSize: Style.font.bodySmall }
+                  }
+                  // on disk: a drive in the value tone; a download: the arrow, quieter; here but for a part: both
+                  Row {
+                    visible: !!r.info && !!r.info.size
+                    spacing: Style.space(4)
+                    Label { text: root.glyph(r.info && r.info.disk === "download" ? "download" : "disk"); color: r.info && r.info.disk !== "download" ? root.valueTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    Label { text: r.info ? r.info.size : ""; color: r.info && r.info.disk !== "download" ? root.valueTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    Label { visible: !!r.info && !!r.info.rest; text: "+ " + root.glyph("download") + " " + (r.info ? r.info.rest : ""); color: root.labelTone; font.pixelSize: Style.font.bodySmall }
+                  }
+                  Label { visible: !!r.info && !!r.info.on; text: r.info ? r.info.on : ""; color: root.labelTone; font.pixelSize: Style.font.bodySmall }
+                }
+                // what it can do: sees images, calls tools, thinks
+                Row {
+                  visible: !!r.info
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(8)
+                  Repeater {
+                    model: r.info ? r.info.caps : []
+                    Label {
+                      required property var modelData
+                      text: root.glyph(modelData === "vision" ? "see" : modelData)
+                      color: root.labelTone
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
               }
               Rectangle {
                 id: mrBar

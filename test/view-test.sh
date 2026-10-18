@@ -173,7 +173,7 @@ test('a page has one way back, up to where it belongs: the tab it was opened fro
   const fn=qml.match(/function nav\([^)]*\) \{[^]*?\n  \}/); assert(fn,'nav missing'); vm.runInContext(fn[0],ctx);
   ctx.nav({view:'models',id:''}); ctx.nav({view:'kind',id:'hw',model:'x'});
   assert.equal(ctx.ui.from,'models');
-  assert.deepEqual(m.build(s,{...ctx.ui,view:'kind',id:'test',key:gpu.key}).up,{label:'models',action:'models'});
+  assert.deepEqual(m.build(s,{...ctx.ui,view:'kind',id:'test',key:gpu.key}).up,{label:'get models',action:'models'});
   ctx.nav({view:'home',id:''}); ctx.nav({view:'gpus',id:''});
   assert.deepEqual(m.build(s,ctx.ui).up,{label:'home',action:'home'});
   assert.deepEqual(m.build(s,{view:'folder',id:'test'}).up,{label:'model',action:'more|test'});

@@ -31,6 +31,8 @@ const tab = (st, ui = {}) => m.build(st, {view: 'models', ...ui}).rows;
 const table = rows => rows.filter(r => r.type === 'mrow').map(r => [r.title, r.quant, r.on].join(' | '));
 const sec = rows => rows.filter(r => r.type === 'sec').map(r => r.label);
 const opened = rows => rows[rows.findIndex(x => x.type === 'mrow' && x.open) + 1];
+// a model's opened row, wherever it is listed: get models for one to download, home for one here
+const box = (st, id, ui = {}) => { for (const v of ['models', 'home']) { const r = m.build(st, {view: v, open: 'm:' + id, ...ui}).rows; if (r.some(x => x.type === 'mrow' && x.open)) return opened(r) } };
 let failed = 0;
 function test(name, f) { try { f(); console.log('ok - ' + name) } catch (e) { failed++; console.error('not ok - ' + name + ': ' + e.message) } }
 
@@ -52,7 +54,7 @@ test('a build reads as its model and a short label: the registry says, else its 
 });
 test('home: tabs, the grid, recommended models, the machine; no search, no Refresh', () => {
   const r = home(s);
-  assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home*', 'models']);
+  assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home*', 'get models']);
   assert.equal(r[1].type, 'life');
   assert.deepEqual(sec(r), ['RECOMMENDED', 'THIS MACHINE']);
   assert.deepEqual(table(r), ['Qwen3.8-27B | EXL3 3 bpw | RTX 3090', 'Qwen3.8-27B | Q4_K_M | B70', 'Qwen3.6-35B-A3B | FP8 | 2× B70', 'LFM2.5-2.6B | Q4_K_M | CPU']);
@@ -61,66 +63,74 @@ test('home: tabs, the grid, recommended models, the machine; no search, no Refre
   assert(r.filter(x => x.type === 'mrow').every(x => x.tags.some(t => t.text === 'best pick')));
   assert(!r.some(x => x.type === 'search' || x.type === 'slot' || (x.items || []).some(a => a.action === 'registry')));
 });
-test('home: what runs as cards, then what is ready to start, then those pinned; each row opens in place; a running card has Open, Switch and Stop', () => {
+test('home: what runs as cards, then what is ready to start, the best pick when it is not here, those pinned; a running card has Open, Switch and Stop', () => {
   const st = {...s, pins: ['gemma.3090', 'lfm.cpu'], kinds: s.kinds.map(k => k.hw === 'b70' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
     deployments: [{id: 'lfm.cpu', name: 'LFM2.5-2.6B', keys: ['cpu:0'], state: 'ready', agent: 'pi', session: {}}]};
   const r = home(st);
-  // what runs is a card and no row; ready to start is here; pinned downloads when started
-  assert.deepEqual(sec(r), ['READY TO START', 'PINNED', 'THIS MACHINE']);
-  assert.deepEqual(table(r), ['Qwen3.8-27B | Q4_K_M | B70', 'Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
+  // what runs is a card and no row; ready to start is here; the best pick for each card, not here yet; pinned
+  assert.deepEqual(sec(r), ['READY TO START', 'BEST FOR THIS MACHINE', 'PINNED', 'THIS MACHINE']);
+  assert.deepEqual(table(r), ['Qwen3.8-27B | Q4_K_M | B70', 'Qwen3.8-27B | EXL3 3 bpw | RTX 3090', 'Qwen3.6-35B-A3B | FP8 | 2× B70', 'Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
   const rows = r.filter(x => x.type === 'mrow');
   assert(rows.every(x => !x.live && x.drop && x.action === 'pick|m:' + x.id));
-  // each row's one-click action: Start where its card is free
-  assert.deepEqual(rows.map(x => x.act && x.act.action), ['run|q27.b70|intel-xpu:0', 'run|gemma.3090|nvidia:0']);
-  // the rest of what fits, a click away
-  assert.deepEqual(r.filter(x => x.action === 'models').map(x => x.label), ['2 more models fit this machine']);
+  // each row's one-click action: Start one that is here, Download one that is not
+  assert.deepEqual(rows.map(x => x.act && x.act.action), ['run|q27.b70|intel-xpu:0', 'download|q27.3090', 'download|q35.b70x2', 'download|gemma.3090']);
+  // ready to start reads as here, the rest as a download
+  assert.deepEqual(rows.map(x => x.here + ':' + x.info.disk), ['true:here', 'false:download', 'false:download', 'false:download']);
   const card = r.find(x => x.type === 'run');
   assert.deepEqual([card.primary.label, card.primary.action, card.swap, card.more, card.stop], ['Open pi', 'open|lfm.cpu', 'models', 'more|lfm.cpu', 'stop|lfm.cpu']);
 });
-test('models tab: search line, what is ready to start, then what downloads first, sorted by how smart; too big folded', () => {
+test('get models: a search line, what fits and is not here to download, sorted by how smart; what is here a tab away; too big folded', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'cpu' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
     downloads: [{id: 'gemma.3090', state: 'download', detail: '3 of 20 GB', percent: 15}]};
   const r = tab(st);
-  assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home', 'models*']);
+  assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home', 'get models*']);
   assert.equal(r[1].hint, 'type to search 6 models');
-  assert.deepEqual(sec(r), ['READY TO START', 'DOWNLOAD FIRST']);
+  assert.deepEqual(sec(r), ['TO DOWNLOAD']);
   assert.deepEqual(r.find(x => x.type === 'sec').items.map(x => x.label + (x.on ? '*' : '')), ['smart*', 'fast', 'small']);
-  assert.deepEqual(table(r).slice(0, 2), ['Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090', 'LFM2.5-2.6B | Q4_K_M | CPU']);
-  const rows = r.filter(x => x.type === 'mrow');
-  // a download under way: its progress on the right and as a bar, Cancel in a click; one on disk says so
-  assert.deepEqual([rows[0].title, rows[0].right, rows[0].progress, rows[0].act.label], ['Gemma 4 26B A4B', '↓ 15%', 15, 'Cancel']);
-  assert(rows.find(x => x.title === 'LFM2.5-2.6B').meta.includes('14 GB on disk'));
+  assert.deepEqual(table(r), ['Qwen3.8-27B | EXL3 3 bpw | RTX 3090', 'Qwen3.8-27B | Q4_K_M | B70', 'Qwen3.6-35B-A3B | FP8 | 2× B70']);
+  assert(r.filter(x => x.type === 'mrow').every(x => x.info.disk === 'download' && x.act.label === 'Download'));
+  assert.deepEqual(r.find(x => x.action === 'home').label, '2 models are on this machine');
+  // the download under way and the model on disk are on home: the download's progress on the right and as a bar, Cancel in a click
+  const h = home(st).filter(x => x.type === 'mrow');
+  assert.deepEqual([h[0].title, h[0].right, h[0].progress, h[0].act.label], ['Gemma 4 26B A4B', '↓ 15%', 15, 'Cancel']);
+  assert.deepEqual([h[1].title, h[1].info.disk, h[1].info.size], ['LFM2.5-2.6B', 'here', '14 GB']);
   assert.equal(r.find(x => x.label === 'too big for this machine').value, '1');
   const big = tab(st, {big: true}).find(x => x.type === 'mrow' && x.title === 'Qwen3.8-Flash-Next');
-  assert(big.dim && big.alert);
+  assert(big.dim && big.alert && !big.info);
   assert.deepEqual(big.meta, ['needs 75 GB RAM, you have 40']);
+  // a search covers every model, those here too
+  assert.deepEqual(table(tab(st, {query: 'lfm'})), ['LFM2.5-2.6B | Q4_K_M | CPU']);
 });
-test('a model row opens in place: what it is doing and Start, Download, Pin, Details', () => {
+test('a model row opens in place: what it is doing and Download first, then Download and start, Pin, Details', () => {
   const r = tab(s, {open: 'm:q27.3090'});
   assert.equal(opened(r).note, 'starts with a 14 GB download');
   assert(r.filter(x => x.type === 'mrow').every(x => x.drop));
-  assert.deepEqual(opened(r).items.map(a => a.label + '=' + a.action), ['Start ›=run|q27.3090|nvidia:0', 'Download=download|q27.3090', 'Pin to home=pin|q27.3090',
+  assert.deepEqual(opened(r).items.map(a => a.label + '=' + a.action), ['Download=download|q27.3090', 'Download and start ›=run|q27.3090|nvidia:0', 'Pin to home=pin|q27.3090',
     'Details ›=kind|rtx-3090-24gb|nvidia:0|q27.3090']);
 });
 test('downloaded, downloading, running and pinned rows offer what fits their state', () => {
   const st = {...s, pins: ['lfm.cpu'], kinds: s.kinds.map(k => k.hw === 'cpu' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
     downloads: [{id: 'gemma.3090', state: 'download', detail: '3 of 20 GB', percent: 15}],
     deployments: [{id: 'q27.b70', name: 'Qwen3.8-27B', keys: ['intel-xpu:0'], state: 'ready', agent: 'pi', session: {}}]};
-  const box = id => opened(tab(st, {open: 'm:' + id}));
+  const at = id => box(st, id);
   // a model on this machine is on home already: no Pin
-  assert.deepEqual(box('lfm.cpu').items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
-  assert.equal(box('gemma.3090').note, 'downloading · 3 of 20 GB · 15%');
-  assert.deepEqual(box('gemma.3090').items.map(a => a.action), ['run|gemma.3090|nvidia:0', 'download|gemma.3090|off', 'kind|rtx-3090-24gb|nvidia:0|gemma.3090']);
-  assert.deepEqual(box('q27.b70').items.map(a => a.label), ['Open ›', 'Stop', 'Details ›']);
-  assert.equal(box('q27.b70').note, 'running on B70');
+  assert.deepEqual(at('lfm.cpu').items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
+  assert.equal(at('gemma.3090').note, 'downloading · 3 of 20 GB · 15%');
+  assert.deepEqual(at('gemma.3090').items.map(a => a.action), ['run|gemma.3090|nvidia:0', 'download|gemma.3090|off', 'kind|rtx-3090-24gb|nvidia:0|gemma.3090']);
+  // the running one is a card on home; its row is on get models' search
+  const run = opened(tab(st, {query: 'b70', open: 'm:q27.b70'}));
+  assert.deepEqual(run.items.map(a => a.label), ['Open ›', 'Stop', 'Details ›']);
+  assert.equal(run.note, 'running on B70');
 });
 test('weights on disk an earlier version checked are on disk: Start, Remove download, no download size', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, models: k.models.map(x => x.id === 'q27.3090' ? {...x, onDiskGb: 14.01} : x.id === 'gemma.3090' ? {...x, onDiskGb: 7} : x)} : k)};
-  const r = tab(st, {open: 'm:q27.3090'});
-  assert.equal(opened(r).note, 'on disk; its files are checked when it first starts');
-  assert.deepEqual(opened(r).items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
-  assert(r.find(x => x.id === 'gemma.3090').meta.includes('7 GB left to download'));
-  assert.deepEqual(sec(home(st)), ['READY TO START', 'THIS MACHINE']);
+  const q = box(st, 'q27.3090');
+  assert.equal(q.note, 'on disk; its files are checked when it first starts');
+  assert.deepEqual(q.items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
+  // half here: on home, saying what is left
+  const g = home(st).find(x => x.id === 'gemma.3090');
+  assert.deepEqual([g.info.disk, g.info.rest], ['part', '7 GB']);
+  assert.deepEqual(sec(home(st)), ['READY TO START', 'BEST FOR THIS MACHINE', 'THIS MACHINE']);
 });
 test('the best pick is the smartest that answers at a usable speed; the fastest is marked; sort by smart, fast or small', () => {
   const sp = (d, aa, size) => ({speed: {decode: d, prefill: 300, at: '2026-10-15', source: 'lab'}, aa, sizeGb: size});
@@ -132,7 +142,9 @@ test('the best pick is the smartest that answers at a usable speed; the fastest 
   const rows = tab(st).filter(x => x.type === 'mrow');
   assert.deepEqual(rows.map(x => x.id + ':' + x.right + ':' + x.tags.map(t => t.text).join(',')),
     ['fp8:23.8 tok/s:best pick', 'int4:15.7 tok/s:', 'g26:64 tok/s:fastest', 'g12:47.7 tok/s:']);
-  assert.deepEqual(rows[0].meta.slice(0, 3), ['smart 28', '128K ctx', '31 GB download']);
+  // how smart, against the smartest here, in five steps; its context and download
+  assert.deepEqual(rows.map(x => x.info.pips), [5, 5, 3, 3]);
+  assert.deepEqual([rows[0].info.ctx, rows[0].info.size, rows[0].info.disk], ['128K', '31 GB', 'download']);
   assert.deepEqual(tab(st, {sort: 'fast'}).filter(x => x.type === 'mrow').map(x => x.id), ['g26', 'g12', 'fp8', 'int4']);
   assert.deepEqual(tab(st, {sort: 'small'}).filter(x => x.type === 'mrow').map(x => x.id), ['g12', 'g26', 'int4', 'fp8']);
   // none fast enough: the fastest
@@ -144,8 +156,13 @@ test('a card running one of your models offers Switch to this on every other mod
     deployments: [{id: 'q27.3090', name: 'Qwen3.8-27B', keys: ['nvidia:0'], state: 'ready', agent: 'pi', session: {}}]};
   const r = tab(st, {open: 'm:gemma.3090'});
   assert.equal(opened(r).note, 'starts with a 14 GB download · Switch stops Qwen3.8-27B first');
-  assert.deepEqual(opened(r).items[0], {label: 'Switch to this ›', action: 'switch|q27.3090|gemma.3090|nvidia:0', primary: true});
+  // not here: download it first, or download and switch
+  assert.deepEqual(opened(r).items.slice(0, 2), [{label: 'Download', action: 'download|gemma.3090', primary: true}, {label: 'Download and switch ›', action: 'switch|q27.3090|gemma.3090|nvidia:0'}]);
   assert(!r.find(x => x.id === 'gemma.3090').dim);
+  // here: Switch to this, in one click too
+  const on = {...st, kinds: st.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, models: k.models.map(x => ({...x, downloaded: true}))} : k)};
+  assert.deepEqual(box(on, 'gemma.3090').items[0], {label: 'Switch to this ›', action: 'switch|q27.3090|gemma.3090|nvidia:0', primary: true});
+  assert.equal(home(on).find(x => x.id === 'gemma.3090').act.label, 'Switch ›');
   // a card another program holds offers nothing to switch from
   const held = {...st, kinds: st.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, taken: ['nvidia:0']} : k), deployments: []};
   const h = tab(held, {open: 'm:gemma.3090'});
@@ -154,11 +171,10 @@ test('a card running one of your models offers Switch to this on every other mod
 });
 test('a card that shares the host memory offers Run alongside, within its share and what is free, restarting one that runs on its own', () => {
   const uni = {...s.gpus[0], key: 'nvidia:0', hw: 'spark', name: 'RTX Spark N1X', unified: true, vramGb: 120, usedMiB: null};
-  const mk = (id, name, share, full) => rec(id, name, {engine: 'vllm', shareGb: share, fullGb: full, sizeGb: 30});
+  const mk = (id, name, share, full) => rec(id, name, {engine: 'vllm', shareGb: share, fullGb: full, sizeGb: 30, downloaded: true});
   const st = {...base, host: {ramGb: 128, freeRamGb: 90}, gpus: [uni], kinds: [{hw: 'spark', keys: ['nvidia:0'], free: [], taken: [], groups: [],
     models: [mk('qwen', 'Qwen3.8-27B', 49.5, 89.6), mk('g26', 'Gemma 4 26B A4B', 39.3, 89.6), mk('g12', 'Gemma 4 12B', 34.9, 89.6), rec('llama', 'Other', {engine: 'llama.cpp'})]}],
     deployments: [{id: 'qwen', name: 'Qwen3.8-27B', keys: ['nvidia:0'], state: 'ready', agent: 'pi', session: {}, shareGb: 49.5, fullGb: 89.6}]};
-  const box = (x, id) => opened(tab(x, {open: 'm:' + id}));
   // on its own as validated: it restarts shared, giving back the rest of what it holds
   const g12 = box(st, 'g12');
   assert.deepEqual(g12.items.map(a => a.label + '=' + a.action).slice(0, 2), ['Switch to this ›=switch|qwen|g12|nvidia:0', 'Run alongside=alongside|g12|nvidia:0|qwen']);
