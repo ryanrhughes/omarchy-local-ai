@@ -4,6 +4,27 @@ Versions follow semver and live in `manifest.json`. Every release is a tag `vX.Y
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-10-18
+
+This fork (ryanrhughes/omarchy-local-ai) reads its catalog from ryanrhughes/local-ai-registry.
+
+### Added
+- Model rows you can tell apart: two lines, the model's own name with its build beside it (Qwen3.8-27B FP8, Gemma 4 26B A4B INT4) and, under them, how smart it is, its context, its size and whether it is on disk, and what it can do. Its measured speed on your card is on the right. The panel is 520 wide; a long nvidia-smi name is the card's own (RTX Spark N1X).
+- A best pick that answers at a usable speed: the smartest model that fits and decodes at 20 tok/s or more on your card (the fastest when none does), and the fastest marked as such. The models tab sorts by smart, fast or small.
+- Switch to this: one click stops the model on a card and starts another there. A running model's card has Switch, which leads to the models.
+- Run alongside, on a card that shares the host memory (RTX Spark N1X, DGX Spark): a second model beside the first, each with a share of the memory sized to its whole context from what vLLM measured on this machine, together within 72% of the memory and leaving the desktop 6 GB. One running on its own restarts shared first; a start waits for a model beside it to finish starting before it reads what is free.
+- What the registry says of a model on its page: what it is, what it is good for, when it was released, and how fast it ran on your card when tested (writing and reading, the date, lab or publisher).
+- Not yet tested on this card: a folded list of the models tested only on other cards that would fit this machine, each saying where, linking to the registry and Hugging Face; none can be started.
+- Downloads show their progress on their row, and ripple the bar mark.
+- Qwen3.6-35B-A3B NVFP4 on the RTX Spark N1X: 103 tok/s decode, 1,184 tok/s prefill, 256K context with MTP, gated on the owner's machine at memory 0.6.
+
+### Fixed
+- Every RTX Spark N1X and DGX Spark model starts again. Since 6.17 the engine has no network, so the speculative drafts vLLM downloaded at start (DFlash for Qwen3.8-27B, MTP assistants for Gemma 4) could not arrive; they are now pinned weights, checked and mounted like the model's own.
+- Weights an earlier version downloaded and checked are on disk, not "not downloaded": they are checked again when the model first starts, without a download.
+- A worker running while the backend file changes (a plugin update during a start) no longer runs another part of it.
+
+Recipes are at registry `bf891e65` (ryanrhughes/local-ai-registry).
+
 ## [6.23.0] - 2026-10-17
 
 ### Added

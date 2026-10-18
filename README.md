@@ -4,6 +4,8 @@ Run a local model on your own GPU or CPU and open a coding agent on it. Local AI
 
 ![Local AI](preview.png)
 
+> **This fork** ([ryanrhughes/omarchy-local-ai](https://github.com/ryanrhughes/omarchy-local-ai)) reads its catalog from [ryanrhughes/local-ai-registry](https://github.com/ryanrhughes/local-ai-registry), which adds each recipe's measured speed, build and model description. It shows them on two-line model rows with a best pick that answers at a usable speed, sorts by smart, fast or small, switches models in one click, runs two models side by side on a card that shares the host memory, and lists the models tested only on other cards. Install it with `omarchy plugin add https://github.com/ryanrhughes/omarchy-local-ai --enable`.
+
 ## Start
 
 ```bash
@@ -51,6 +53,7 @@ what one runs; those come with plugin updates.
 - **Weights** are downloaded as you, from the pinned revision, and every file is checked against the hash Hugging Face lists for it before it is used: the SHA-256 of a large (LFS) file, the Git blob SHA-1 of a small one (configs, tokenizers, chat templates, model code). A copy in your Hugging Face cache is reused only when it passes the same check.
 - **Containers.** The engine runs on its own internal Docker network that the host has no address on, shared only with its gateway, with no published port and `no-new-privileges`. A keyed gateway runs as you on the model's own Docker network, speaks the OpenAI, Anthropic and Responses APIs, and logs one line per answer; the tokens, speeds, charts and the activity grid on Home come from that log, summed once per new line rather than on every refresh.
 - **Agents.** pi, Claude Code, Codex, OpenCode, omp, Crush, Grok, Copilot and Hermes open in a terminal, in the folder you pick, pointed at the gateway. Nothing in their own config is touched. A model's details list the agents once, the chosen one checked; on the agents page the chosen one is the default for new models. **Update to <version>** appears when mise or npm has a newer version of the agent. Click the folder row to browse folders inside the panel (click into a folder, or up, then **Use this folder**; recent folders are listed too). **Open** launches the chosen agent from home or the model's page. Agent choices on a running model do not change the default; the last folder picked remains the folder default. Updates use mise when it manages that agent, the native updater for standalone omp, Hermes, Claude Code and OpenCode, or npm for an existing npm installation. Existing sessions keep running.
+- **Switch and run alongside.** A model's row offers **Switch to this** when its card runs another of your models: that one stops and this one starts there. On a card that shares the host memory (RTX Spark N1X, DGX Spark) it may also offer **Run alongside**: both run, each with a share of the memory sized to its whole context from what vLLM measured on this machine (kept in `~/.local/state/omarchy/local-ai/fit.json`), together within 72% of the memory, leaving the desktop at least 6 GB. A model running on its own restarts shared first. `omarchy-local-ai run <recipe> <gpu> alongside` does the same from a shell.
 - **Share** a running model on your tailnet with `tailscale serve` (tailnet only, still keyed). **Stop sharing** on its page removes that share. Tailscale must be running and logged in. Setup preserves another account’s operator; ask that account to manage sharing. A failed unshare is logged and does not prevent stopping the model.
 
 Supported: x86-64 AVX2 CPUs (LFM2.5-2.6B in system RAM), NVIDIA RTX 30, 40 and 50 series, RTX A6000, RTX Ada and RTX Pro Blackwell, Intel Arc Pro B70, and AMD Instinct MI300X and Radeon RX 6800 XT (with ROCm's `amd-smi`).
@@ -62,7 +65,7 @@ bin/omarchy-local-ai setup                    # one-time machine setup
 bin/omarchy-local-ai registry                 # refresh the validated catalog
 bin/omarchy-local-ai forget <recipe>          # remove stopped managed weights
 bin/omarchy-local-ai snapshot                 # what the card draws, as JSON
-bin/omarchy-local-ai run <recipe> <gpu>[,<gpu>] # e.g. run qwen38-27b-exl3-3bpw-rtx3090-sglang-tp1 nvidia:0
+bin/omarchy-local-ai run <recipe> <gpu>[,<gpu>] [alongside] # e.g. run qwen38-27b-exl3-3bpw-rtx3090-sglang-tp1 nvidia:0
 bin/omarchy-local-ai stop <recipe>
 bin/omarchy-local-ai open <recipe>            # the chosen agent on it, in a terminal
 bin/omarchy-local-ai update <agent>           # update the installed harness
