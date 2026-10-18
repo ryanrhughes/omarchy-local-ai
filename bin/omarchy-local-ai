@@ -2091,4 +2091,6 @@ __download) download_run "${@:2}" ;;
   sed -n 's/^# omarchy:args=//p' "$0"
   exit 2
   ;;
-esac
+# exit on the line that ends the dispatch: bash reads a script as it runs it, so a worker that outlives a plugin update
+# (or any edit to this file) would otherwise read on at its old offset in the new file and run whatever it lands in
+esac; exit $?
