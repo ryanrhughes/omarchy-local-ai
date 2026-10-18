@@ -146,6 +146,29 @@ test('a card running one of your models offers Switch to this on every other mod
   assert(!opened(h).items.some(a => /^(switch|run)\|/.test(a.action)));
   assert(h.find(x => x.id === 'gemma.3090').dim);
 });
+test('a card that shares the host memory offers Run alongside, within its share and what is free, restarting one that runs on its own', () => {
+  const uni = {...s.gpus[0], key: 'nvidia:0', hw: 'spark', name: 'RTX Spark N1X', unified: true, vramGb: 120, usedMiB: null};
+  const mk = (id, name, share, full) => rec(id, name, {engine: 'vllm', shareGb: share, fullGb: full, sizeGb: 30});
+  const st = {...base, host: {ramGb: 128, freeRamGb: 90}, gpus: [uni], kinds: [{hw: 'spark', keys: ['nvidia:0'], free: [], taken: [], groups: [],
+    models: [mk('qwen', 'Qwen3.8-27B', 49.5, 89.6), mk('g26', 'Gemma 4 26B A4B', 39.3, 89.6), mk('g12', 'Gemma 4 12B', 34.9, 89.6), rec('llama', 'Other', {engine: 'llama.cpp'})]}],
+    deployments: [{id: 'qwen', name: 'Qwen3.8-27B', keys: ['nvidia:0'], state: 'ready', agent: 'pi', session: {}, shareGb: 49.5, fullGb: 89.6}]};
+  const box = (x, id) => opened(tab(x, {open: 'm:' + id}));
+  // on its own as validated: it restarts shared, giving back the rest of what it holds
+  const g12 = box(st, 'g12');
+  assert.deepEqual(g12.items.map(a => a.label + '=' + a.action).slice(0, 2), ['Switch to this ›=switch|qwen|g12|nvidia:0', 'Run alongside=alongside|g12|nvidia:0|qwen']);
+  assert(/Run alongside: it shares the RTX Spark N1X's memory, taking 35 GB of the 43 GB left; Qwen3.8-27B restarts with a smaller cache first/.test(g12.note));
+  // already shared: nothing restarts; too big for what is left: no Run alongside
+  const sh = {...st, deployments: [{...st.deployments[0], share: 0.39}]};
+  assert.equal(box(sh, 'g26').items[1].action, 'alongside|g26|nvidia:0');
+  assert(!box({...sh, host: {ramGb: 128, freeRamGb: 40}}, 'g26').items.some(a => /^alongside/.test(a.action)));
+  // an engine that cannot say what it takes, or a card with memory of its own
+  assert(!box(st, 'llama').items.some(a => /^alongside/.test(a.action)));
+  assert(!box({...st, gpus: [{...uni, unified: false}]}, 'g12').items.some(a => /^alongside/.test(a.action)));
+  // a model started shared says so on home, and run again keeps it shared
+  assert.equal(home({...sh, deployments: [{...sh.deployments[0]}]}).find(x => x.type === 'run').mem, '50 GB shared');
+  const crashed = home({...sh, deployments: [{...sh.deployments[0], state: 'error', error: 'gone'}]}).find(x => x.crashed);
+  assert.equal(crashed.run.action, 'again|qwen|nvidia:0|alongside');
+});
 test('models tested only on other cards are folded at the end, never startable, leading to the registry', () => {
   const st = {...s, untested: [{id: 'qwen3.8-flash-next', name: 'Qwen3.8-Flash-Next', family: 'qwen', aa: 39.8, quant: 'EXL3 2.05bpw', sizeGb: 62.8,
     hf: 'Qwen/Qwen3.8-Flash-Next', cards: ['RTX 3090', 'rtx-pro-6000-blackwell-96gb', 'RTX 5090']}]};

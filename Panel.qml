@@ -216,7 +216,12 @@ Panel {
     case "browse": run(["dirs", decodeURIComponent(a[1])]); break
     case "usefolder": run(["set", "folder", decodeURIComponent(a[2])].concat(a[1] ? [a[1]] : [])); nav({ view: a[1] ? "run" : "agents", id: a[1] }); break
     case "run": run(["run", a[1], a[2]]); home(); break
-    case "again": run(["stop", a[1]]); run(["run", a[1], a[2]]); home(); break
+    case "again": run(["stop", a[1]]); run(["run", a[1], a[2]].concat(a[3] ? [a[3]] : [])); home(); break
+    // another model beside those running on a card that shares the host memory: any of them running on its own restarts
+    // shared first, then this one starts shared beside them
+    case "alongside":
+      (a[3] ? a[3].split(",") : []).forEach(function(id) { run(["stop", id]); run(["run", id.replace(/--[0-9]+$/, ""), a[2], "alongside"]) })
+      run(["run", a[1], a[2], "alongside"]); home(); break
     // another model in a running one's place: stop it, then start this one on its card
     case "switch": run(["stop", a[1]]); run(["run", a[2], a[3]]); home(); break
     case "stop": run(["stop", a[1]]); home(); break

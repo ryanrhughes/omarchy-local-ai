@@ -412,6 +412,8 @@ gpus() {
   local ids claims='[]' p
   if [[ ${1:-} != none ]] && docker_reachable; then
     ids=$(docker ps -q) || die "could not check Docker GPU allocations; try again"
+    # our own engines a start beside them may share a card with (shared_ok)
+    [[ -z ${SHARED_OK:-} || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $SHARED_OK) <<<"$ids" || true)
     if [[ -n $ids ]]; then
       # Read only allocation fields, never container environments or credentials.
       # shellcheck disable=SC2086
@@ -816,6 +818,7 @@ settle() {
   ids=$(docker ps -q --filter status=running --filter status=created --filter status=restarting \
     --filter status=paused --filter "before=$c") ||
     die "could not check Docker GPU allocations; try again"
+  [[ -z ${SHARED_OK:-} || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $SHARED_OK) <<<"$ids" || true)
   [[ -n $ids ]] || return 0
   mine=$(docker inspect --format "$f" "$c") || die "could not check Docker GPU allocations; try again"
   # shellcheck disable=SC2086
@@ -853,6 +856,11 @@ phase_start() (
   local id=$1 port=$2 r g backend run a=() devices=() k v w
   shift 2
   r=$(jq -ce '.recipe // empty' "$(dir_of "$id")/config.json" 2>/dev/null || recipe "$id") || die "no recipe $id"
+  # a model started alongside others: its share of the card's memory, and their engines left out of the checks below
+  local share
+  share=$(jq -r '.share // empty | tostring' "$(dir_of "$id")/config.json" 2>/dev/null) || share=""
+  [[ -z $share || $share =~ ^0\.[0-9]+$ ]] || die "invalid share $share"
+  [[ -z $share ]] || SHARED_OK=$(shared_ok "$@" | grep -vxF -f <(docker ps -q --filter "name=^/$(engine "$id")$" 2>/dev/null; echo none) || true)
   v=$(policy "$r")
   [[ $v == "ok" ]] || die "recipe refused: $v"
   (($# == $(jq -r '.cards // 1' <<<"$r"))) || die "this recipe runs on $(jq -r '.cards // 1' <<<"$r") card(s)"
@@ -947,9 +955,12 @@ phase_start() (
   # the rest of the options, the image and its arguments; the cards are chosen above, never by the recipe
   while IFS= read -r -d '' v; do
     a+=("$v")
-  done < <(launch_options "$r"; jq -j --arg run "$run" 'def o($f; $v): if ($v // "") != "" then "\($f)\u0000\($v)\u0000" else "" end;
+  done < <(launch_options "$r"; jq -j --arg run "$run" --arg share "$share" 'def o($f; $v): if ($v // "") != "" then "\($f)\u0000\($v)\u0000" else "" end;
     o("--volume"; .asset | if . then "\($run)/\(.name):\(.mountPath):ro" else null end),
-    "\(.image)\u0000", (.launch.arguments[]? | "\(.)\u0000")' <<<"$r")
+    "\(.image)\u0000", ((.launch.arguments // []) as $a | ($a | index("--gpu-memory-utilization")) as $i | $a | to_entries[]
+      | if $share != "" and $i != null and .key == $i + 1 then $share
+        elif $share != "" and (.value | tostring | startswith("--gpu-memory-utilization=")) then "--gpu-memory-utilization=" + $share
+        else .value end | "\(.)\u0000")' <<<"$r")
   [[ ! -e $(dir_of "$id")/cancel ]] || die "start cancelled"
   if ! "${a[@]}" >/dev/null; then
     remove "$id"
@@ -1117,10 +1128,29 @@ worker_run() {
   notify -r "$NID" "$WNAME is ready" "Open your agent on it from Local AI." >/dev/null
 }
 
+# beside <keys...>: each model of this account on any of these cards, one a line: its id and the share of the card's
+# memory it was started with ("" when it runs on its own, as validated)
+beside() {
+  local f
+  for f in "$STATE"/deploy/*/config.json; do
+    [[ -f $f ]] || continue
+    jq -r --args '. as $c | select(any(.keys[]; . as $k | $ARGS.positional | index($k) != null)) | "\(.id)\t\($c.share // "")"' "$f" "$@" 2>/dev/null
+  done
+}
+# shared_ok <keys...>: the containers of this account's engines that run shared on these cards, which a start beside
+# them leaves out of every check that a card is taken (gpus, settle); another program's hold on a card still counts
+shared_ok() {
+  local id share
+  while IFS=$'\t' read -r id share; do
+    [[ -n $share ]] && docker ps -q --filter "name=^/$(engine "$id")$" 2>/dev/null
+  done < <(beside "$@")
+}
+
 cmd_run() {
-  valid_id "${1:-}" && [[ -n ${2:-} ]] || die "run <recipe> <gpu>[,<gpu>...]"
+  valid_id "${1:-}" && [[ -n ${2:-} ]] || die "run <recipe> <gpu>[,<gpu>...] [alongside]"
+  [[ -z ${3:-} || $3 == alongside ]] || die "run <recipe> <gpu>[,<gpu>...] [alongside]"
   require_ready
-  local id=${1%--*} keys=() k r d g port busy n=1
+  local id=${1%--*} keys=() k r d g port busy n=1 share="" frac="" used=0 other ofrac
   IFS=, read -ra keys <<<"$2"
   r=$(recipe "$id") || die "no recipe $id"
   [[ $(policy "$r") == "ok" ]] || die "recipe refused: $(policy "$r")"
@@ -1136,10 +1166,39 @@ cmd_run() {
   exec 9>"$STATE/claim.lock"
   flock -w 10 9 || die "another model operation is running; try again"
   busy=$(cat "$STATE"/deploy/*/config.json 2>/dev/null | jq -r '.keys[], .port')
+  # Alongside: on a card that shares the host memory, beside your other models there, each with a share of that memory
+  # sized to hold its whole context (sharegb) rather than what it was validated with. Every model already on the card
+  # must run shared too, and all of them together stay within 72% of the memory, so the desktop keeps the rest.
+  if [[ ${3:-} == alongside ]]; then
+    share=$(jq -r --argjson h "$(host)" "$NEEDS$SUMMARY"'sharegb($h) // empty' <<<"$r")
+    [[ -n $share ]] || die "$(jq -r .name <<<"$r") cannot share a card: its engine does not say how much memory it takes"
+    frac=$(jq -nr --argjson s "$share" --argjson t "$(host | jq .ramGb)" '$s / $t * 100 | ceil / 100')
+    while IFS=$'\t' read -r other ofrac; do
+      [[ -n $ofrac ]] || die "$(jq -r '.serve.name // .id' "$(dir_of "$other")/config.json") runs on its own there; start it alongside first"
+      used=$(jq -nr --argjson a "$used" --argjson b "$ofrac" '$a + $b')
+    done < <(beside "${keys[@]}")
+    jq -ne --argjson u "$used" --argjson f "$frac" '$u + $f <= 0.72' >/dev/null ||
+      die "not enough memory to run $(jq -r .name <<<"$r") alongside: it needs $(jq -nr --argjson f "$frac" '$f * 100 | round')% of it, $(jq -nr --argjson u "$used" '72 - $u * 100 | round')% is left"
+    # and what is free now: a model still starting has not taken its share yet, and the desktop keeps 6 GB
+    local pending=0 h
+    while IFS=$'\t' read -r other ofrac; do
+      [[ $(jq -r .state "$(dir_of "$other")/status.json" 2>/dev/null) == ready ]] ||
+        pending=$(jq -nr --argjson a "$pending" --argjson b "$ofrac" '$a + $b')
+    done < <(beside "${keys[@]}")
+    h=$(host)
+    jq -ne --argjson h "$h" --argjson p "$pending" --argjson f "$frac" '$h.freeRamGb - ($p + $f) * $h.ramGb >= 6' >/dev/null ||
+      die "not enough free memory to run $(jq -r .name <<<"$r") alongside: it needs $share GB and $(jq -nr --argjson h "$h" --argjson p "$pending" '$h.freeRamGb - $p * $h.ramGb - 6 | floor') GB is free beside the desktop; close something and try again"
+    SHARED_OK=$(shared_ok "${keys[@]}")
+  fi
   g=$(gpus)
   for k in "${keys[@]}"; do
     valid_key "$k" || die "run <recipe> <gpu>[,<gpu>...]"
-    grep -qxF -- "$k" <<<"$busy" && die "$k is in use"
+    if [[ -n $frac ]]; then
+      jq -e --arg k "$k" 'any(.[]; .key == $k and .unified == true)' <<<"$g" >/dev/null ||
+        die "$k has memory of its own; models run alongside each other only on a card that shares the host memory"
+    else
+      grep -qxF -- "$k" <<<"$busy" && die "$k is in use"
+    fi
     jq -e --arg k "$k" --arg h "$(jq -r .hw <<<"$r")" 'any(.[]; .key == $k and .hw == $h)' <<<"$g" >/dev/null ||
       die "$(jq -r .name <<<"$r") is not validated for $k"
     jq -e --arg k "$k" 'any(.[]; .key == $k and (.held or (.usedMiB // 0) > 2048))' <<<"$g" >/dev/null &&
@@ -1159,8 +1218,10 @@ cmd_run() {
   # what Open tells the agent is kept with the model, so a registry update that renames its recipe does not strand it
   jq -nc --arg id "$id" --argjson uid "$(id -u)" --argjson p "$port" --arg a "$(get agent)" --arg f "$(get folder)" --arg t "$(now)" --argjson r "$r" \
     --argjson managed "$(managed_paths "$r" | jq -Rsc 'split("\n") | map(select(length > 0))')" \
+    --arg share "$frac" \
     '{id: $id, containerUid: $uid, keys: $ARGS.positional, port: $p, agent: $a, folder: $f, startedAt: $t,
-      recipe: $r, managedPaths: $managed, serve: {name: $r.name, ctx: ($r.serving.ctxTokens // 32768), vision: ($r.capabilities.vision // false)}}' \
+      recipe: $r, managedPaths: $managed, serve: {name: $r.name, ctx: ($r.serving.ctxTokens // 32768), vision: ($r.capabilities.vision // false)}}
+      + (if $share != "" then {share: ($share | tonumber)} else {} end)' \
     --args "${keys[@]}" >"$d/config.json.$$"
   mv -f "$d/config.json.$$" "$d/config.json"
   flock -u 9
@@ -1856,9 +1917,19 @@ SUMMARY='def folders: [.weights[]? | if .layout == "hub" then "" else "\(.reposi
 def downloaded($h): folders as $w | ($w | length) > 0 and all($w[]; . as $x | $x != "" and ($h.have | index($x + "/.verified2")) != null);
 # the bytes of its weights already on disk, checked or not (a download under way, or one an earlier version checked)
 def ondisk($h): [folders[] | $h.got[.] // 0] | add // 0 | . / 1e9 | . * 100 | floor / 100;
+# sharegb($h): what a vLLM recipe takes of a card that shares the host memory when it runs beside another model there:
+# its weights, 3 GB for the engine, and cache for its whole context and a tenth more, at the bytes a token takes when
+# the memory it was validated with holds the cache it states; never more than it was validated with. null for a recipe
+# that cannot say (another engine, no memory fraction, no cache size).
+def util: (.launch.arguments // []) as $a | ($a | index("--gpu-memory-utilization")) as $i
+  | if $i != null then ($a[$i + 1] | tonumber? // null)
+    else first($a[] | select(type == "string" and startswith("--gpu-memory-utilization=")) | ltrimstr("--gpu-memory-utilization=") | tonumber?) // null end;
+def sharegb($h): util as $m | (.serving.kvTokens // 0) as $k | (.serving.ctxTokens // 0) as $c | (.sizeGb // 0) as $w | ($h.ramGb // 0) as $t
+  | if .engine != "vllm" or $m == null or $k <= 0 or $c <= 0 or $t <= 0 or ($m * $t - $w - 3) <= 0 then null
+    else (($m * $t - $w - 3) / $k) as $b | [$w + 3 + $b * ([$c * 1.1, $k] | min), $m * $t] | min | . * 10 | ceil / 10 end;
 def summary($h): {id, name, family, cards: (.cards // 1), format, engine, sizeGb, ctx: .serving.ctxTokens, kv: .serving.kvTokens, caps: .capabilities,
   reported: (.reported // false), aa, quant, speed, model, needs, weights: [.weights[]? | {repository, revision}], unfit: unfit($h),
-  downloaded: downloaded($h), onDiskGb: ondisk($h)};'
+  downloaded: downloaded($h), onDiskGb: ondisk($h), shareGb: sharegb($h), fullGb: (util as $m | if $m != null and .engine == "vllm" then $m * ($h.ramGb // 0) | . * 10 | round / 10 else null end)};'
 
 # downloads: each download under way or failed, with its id; one whose worker is gone has stopped
 downloads() {

@@ -96,7 +96,7 @@ function stopped(s, ui) {
     // a recipe this version no longer offers cannot start again: dismiss only, and its download is listed below
     var row = { type: "slot", label: d.name, toggle: "pick|lost:" + d.id, open: ui.open === "lost:" + d.id, crashed: true,
       hint: d.offered === false ? "no longer offered" : "stopped",
-      run: here && d.offered !== false ? { label: "run again ›", action: "again|" + d.id + "|" + d.keys.join(",") } : null, dismiss: "stop|" + d.id }
+      run: here && d.offered !== false ? { label: "run again ›", action: "again|" + d.id + "|" + d.keys.join(",") + (d.share ? "|alongside" : "") } : null, dismiss: "stop|" + d.id }
     var rows = [row, { type: "error", label: d.error || "stopped" }]
     if (row.open) rows.push({ type: "links", note: "", items: [{ label: "View logs", action: "log" }, { label: "Details ›", action: "more|" + d.id }] })
     return rows
@@ -221,7 +221,15 @@ function catalog(s) {
     // the fastest that fits, when it is not the best pick already
     var quick = kd.models.filter(function(r) { return fits(r) && r.speed && r.speed.decode }).sort(function(a, b) { return b.speed.decode - a.speed.decode })[0]
     // a card of this kind running one of your models, which Switch stops to start another (never one another program holds)
-    var mine = (s.deployments || []).filter(function(x) { return x.keys.some(function(k) { return kd.keys.indexOf(k) >= 0 && kd.taken.indexOf(k) < 0 }) })[0]
+    var on = (s.deployments || []).filter(function(x) { return x.keys.some(function(k) { return kd.keys.indexOf(k) >= 0 && kd.taken.indexOf(k) < 0 }) })
+    var mine = on[0]
+    // A card that shares the host memory can run another model alongside: each with a share sized to hold its whole
+    // context, together within 72% of the memory. One running on its own, as validated, restarts shared first.
+    var shared = !!g && !!g.unified && kd.keys.length === 1 && on.length > 0, ram = (s.host || {}).ramGb || 0
+    var room = 0.72 * ram - on.reduce(function(a, x) { return a + (x.share ? x.share * ram : x.shareGb != null ? x.shareGb : Infinity) }, 0)
+    // and what is free now, beside the desktop's 6 GB: a model that restarts shared gives back what it holds first
+    var freed = on.reduce(function(a, x) { return a + (!x.share && x.state === "ready" && x.fullGb != null ? x.fullGb - x.shareGb : 0) }, 0)
+    room = Math.min(room, ((s.host || {}).freeRamGb || 0) - 6 + freed)
     ;(kd.groups || []).forEach(function(gr) { if (fits(gr) && kd.keys.length >= gr.cards && !rec["n" + gr.cards]) rec["n" + gr.cards] = rec[gr.id] = 1 })
     kd.models.concat(kd.groups || []).forEach(function(r, i) {
       var n = r.cards || 1, short_ = kd.keys.length < n
@@ -240,6 +248,10 @@ function catalog(s) {
         // a card busy with another of your models: stop it and start this one there
         swap: !d && n === 1 && kd.free.length < n && mine && fits(r) ? "switch|" + mine.id + "|" + r.id + "|" + mine.keys.filter(function(k) { return kd.keys.indexOf(k) >= 0 })[0] : "",
         swapFrom: mine ? [title(mine), quantOf(mine)].filter(Boolean).join(" ") : "",
+        beside: !d && n === 1 && shared && fits(r) && r.shareGb != null && r.shareGb <= room
+          ? "alongside|" + r.id + "|" + kd.keys[0] + (on.some(function(x) { return !x.share }) ? "|" + on.filter(function(x) { return !x.share }).map(function(x) { return x.id }).join(",") : "") : "",
+        besideNote: shared && r.shareGb != null ? "Run alongside: it shares the " + short(hw) + "'s memory, taking " + gb(r.shareGb) + " of the " + gb(Math.max(0, room)) + " left"
+          + (on.some(function(x) { return !x.share }) ? "; " + on.filter(function(x) { return !x.share }).map(function(x) { return [title(x), quantOf(x)].filter(Boolean).join(" ") }).join(", ") + " restarts with a smaller cache first" : "") : "",
         action: d ? "more|" + d.id : short_ ? "" : n > 1 ? "group|" + kd.hw + "|" + n + "|" + r.id : "kind|" + kd.hw + "|" + (kd.free[0] || kd.keys[0]) + "|" + r.id })
     })
   })
@@ -332,6 +344,7 @@ function manage(c) {
   else if (c.d) items.push({ label: "Stop", action: stop(c.d), danger: true })
   else if (c.fits && c.free && c.run) items.push({ label: "Start ›", action: c.run, primary: true })
   else if (c.swap) items.push({ label: "Switch to this ›", action: c.swap, primary: true })
+  if (c.beside) items.push({ label: "Run alongside", action: c.beside })
   if (!c.d) {
     if (c.dl && c.dl.state === "download") items.push({ label: "Cancel download", action: "download|" + c.id + "|off" })
     else if (c.downloaded || c.onDisk) items.push({ label: "Remove download", action: "forget|" + c.id, danger: true })
@@ -340,7 +353,7 @@ function manage(c) {
   // a model on this machine is on home already; one that is not can be pinned there to try later
   if (!c.d && !c.dl && !c.downloaded && !c.onDisk) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
   items.push({ label: "Details ›", action: c.action })
-  var note = [blurb(c), state(c)].filter(Boolean).join("\n")
+  var note = [blurb(c), state(c), c.beside ? c.besideNote : ""].filter(Boolean).join("\n")
   return { type: "links", note: note, items: items.filter(function(x) { return x.action !== undefined && x.action !== "" }) }
 }
 // home's models: the ones you pinned (running or downloading one pins it), else the recommended ones
@@ -478,7 +491,8 @@ function card(s, d) {
   var total = cards.reduce(function(a, g) { return a + (g.vramGb || 0) }, 0)
   var r = { type: "run", name: title(d), quant: quantOf(d), family: d.family, line: all.line || [], more: "more|" + d.id,
     gpu: (cards.length > 1 ? cards.length + " × " : "") + (cards[0] ? cards[0].name : "GPU"),
-    mem: total && !working(d) ? (known ? Math.round(used) + " / " : "") + total + " GB" : "" }
+    mem: d.share && s.host && s.host.ramGb ? Math.round(d.share * s.host.ramGb) + " GB shared"
+      : total && !working(d) ? (known ? Math.round(used) + " / " : "") + total + " GB" : "" }
   if (d.state === "ready") {
     r.chips = [all.decode ? { icon: "speed", text: all.decode + " tok/s" } : null, { icon: "tokens", text: k(all.tokens) }].filter(Boolean)
     r.primary = { label: "Open " + agentName(d.agent), action: "open|" + d.id }
@@ -578,7 +592,7 @@ function page(s, ui, m) {
   // one action, two when it runs: Open and Stop; none for a model this machine cannot run
   if (run && run.offered === false) v.rows.push({ type: "links", note: "no longer offered: once stopped, it cannot start again, and its download is listed on home to remove", items: [] })
   if (!m.unfit || run) v.rows.push({ type: "acts", items: failed && run.offered === false ? [{ label: "Dismiss", action: "stop|" + run.id, danger: true }]
-    : failed ? [{ label: "Run again ›", action: "again|" + run.id + "|" + run.keys.join(","), primary: true }, { label: "Dismiss", action: "stop|" + run.id, danger: true }]
+    : failed ? [{ label: "Run again ›", action: "again|" + run.id + "|" + run.keys.join(",") + (run.share ? "|alongside" : ""), primary: true }, { label: "Dismiss", action: "stop|" + run.id, danger: true }]
     : run && run.state === "ready" ? [{ label: "Open " + agentName(run.agent) + " ›", action: "open|" + run.id, primary: true }, { label: "Stop", action: stop(run), danger: true }]
     : run ? [{ label: "Stop", action: stop(run), danger: true }]
     : [{ label: "Start ›", action: m.action || "", primary: true }] })

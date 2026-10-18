@@ -444,6 +444,13 @@ pass "the key is only ever sent to the gateway's bridge address; the poll sends 
 "$CLI" run "$ID" nvidia:0 2>"$TMP/err" && fail "second run"
 grep -q "nvidia:0 is in use" "$TMP/err" || fail "second run reason" "$(cat "$TMP/err")"
 pass "a card that is running a model cannot be claimed twice"
+# alongside is for a card that shares the host memory, with a recipe that says what it takes; never on a card with
+# memory of its own, and never as a way around the card being in use
+"$CLI" run "$ID" nvidia:0 alongside 2>"$TMP/err" && fail "alongside on a card with its own memory"
+grep -qE "cannot share a card|runs on its own there|has memory of its own" "$TMP/err" || fail "alongside reason" "$(cat "$TMP/err")"
+[[ $(ls -d "$STATE"/deploy/*/ | wc -l) == 1 ]] || fail "alongside left a deployment" "$(ls "$STATE/deploy")"
+"$CLI" run "$ID" nvidia:0 beside 2>"$TMP/err" && fail "an unknown run mode"
+pass "running alongside is refused on a card with memory of its own, and leaves the running model alone"
 
 "$CLI" run "$ID" nvidia:2
 wait_for ready "$ID--2"
