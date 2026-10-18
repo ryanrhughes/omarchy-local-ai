@@ -113,7 +113,7 @@ test('weights on disk an earlier version checked are on disk: Start, Remove down
   const r = tab(st, {open: 'm:q27.3090'});
   assert.equal(opened(r).note, 'on disk; its files are checked when it first starts');
   assert.deepEqual(opened(r).items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
-  assert(r.find(x => x.id === 'gemma.3090').meta.includes('14 GB, 50% here'));
+  assert(r.find(x => x.id === 'gemma.3090').meta.includes('7 GB left to download'));
   assert.deepEqual(sec(home(st)), ['YOUR MODELS', 'THIS MACHINE']);
 });
 test('the best pick is the smartest that answers at a usable speed; the fastest is marked; sort by smart, fast or small', () => {

@@ -292,7 +292,7 @@ function mrow(c) {
   else {
     if (c.aa != null) meta.push("smart " + Math.round(c.aa))
     if (c.ctx) meta.push(ctx(c.ctx) + " ctx")
-    if (c.size) meta.push(gb(c.size) + (c.onDisk ? " on disk" : c.part > 0 ? ", " + c.part + "% here" : " download"))
+    if (c.size) meta.push(c.onDisk ? gb(c.size) + " on disk" : c.part > 0 ? gb(c.size * (100 - c.part) / 100) + " left to download" : gb(c.size) + " download")
     if (c.kinds > 1 || c.n > 1) meta.push(c.on)
     var caps = []
     if (c.caps.vision) caps.push("vision")
@@ -360,7 +360,8 @@ function manage(c) {
 function pinned(s, ui) {
   // your models: what is on this machine (running, downloading, downloaded), then those you pinned to try; until
   // there are any, the recommended ones
-  var all = catalog(s), here = function(c) { return c.d || c.dl || c.downloaded || c.onDisk }
+  // part of it counts: a model whose own weights are here but whose draft is not yet is still yours
+  var all = catalog(s), here = function(c) { return c.d || c.dl || c.downloaded || c.onDisk || c.part > 0 }
   var mine = all.filter(here).sort(function(a, b) { return (!!b.d - !!a.d) || sorter(ui.sort)(a, b) })
     .concat(all.filter(function(c) { return !here(c) && c.pin >= 0 }).sort(function(a, b) { return a.pin - b.pin }))
   var top = mine.length ? mine : all.filter(function(c) { return c.rec && c.fits })
