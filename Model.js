@@ -516,7 +516,7 @@ function card(s, d) {
   var r = { type: "run", name: title(d), quant: quantOf(d), family: d.family, line: rises ? ln : [], more: "more|" + d.id,
     gpu: (cards.length > 1 ? cards.length + " × " : "") + (cards[0] ? cards[0].name : "GPU"),
     mem: d.share && s.host && s.host.ramGb ? Math.round(d.share * s.host.ramGb) + " GB shared"
-      : uni && d.fullGb != null ? Math.round(d.fullGb) + " GB reserved"
+      : uni ? (d.fullGb != null ? Math.round(d.fullGb) + " GB reserved" : "")
       : total && !working(d) ? (known ? Math.round(used) + " / " : "") + total + " GB" : "" }
   if (d.state === "ready") {
     r.chips = [all.decode ? { icon: "speed", text: all.decode + " tok/s" } : null, { icon: "tokens", text: k(all.tokens) }].filter(Boolean)
