@@ -617,14 +617,15 @@ Panel {
           Component {
             id: runC
             Rectangle {
-              height: Style.space(172)
+              // as tall as what it holds: its name and card, what it is doing, its token line when it has one, its buttons
+              height: runBody.implicitHeight + Style.space(32)
               // a little above the page: a lighter surface, and a light border that glows slowly
               color: Util.alpha(root.theme, 0.08)
               border.width: 1
               border.color: Util.alpha(root.theme, root.glow)
               clip: true
-              Line { anchors.fill: parent; values: r.line }
               Column {
+                id: runBody
                 x: root.pad
                 y: Style.space(16)
                 width: parent.width - 2 * root.pad
@@ -672,22 +673,22 @@ Panel {
                   color: root.ruleTone
                   Rectangle { width: parent.width * (r.progress || 0) / 100; height: parent.height; color: root.ink }
                 }
-              }
-              Row {
-                x: root.pad
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: Style.space(14)
-                spacing: Style.space(8)
-                Btn {
-                  label: r.primary.label + (r.primary.quiet ? "" : " ›")
-                  action: r.primary.action
-                  primary: !r.primary.quiet
-                  danger: !!r.primary.quiet
+                // its tokens over time, in a strip of its own, when they rise
+                Line { visible: (r.line || []).length > 0; width: parent.width; height: visible ? Style.space(32) : 0; values: r.line || [] }
+                Item { width: 1; height: Style.space(4) }
+                Row {
+                  spacing: Style.space(8)
+                  Btn {
+                    label: r.primary.label + (r.primary.quiet ? "" : " ›")
+                    action: r.primary.action
+                    primary: !r.primary.quiet
+                    danger: !!r.primary.quiet
+                  }
+                  Btn { label: r.swap ? "Switch ›" : ""; action: r.swap || "" }
+                  Btn { label: root.glyph("more"); action: r.more }
+                  // a ready model stops from home too (one starting has Stop as its first button)
+                  Btn { label: r.stop ? "Stop" : ""; action: r.stop || ""; danger: true }
                 }
-                Btn { label: r.swap ? "Switch ›" : ""; action: r.swap || "" }
-                Btn { label: root.glyph("more"); action: r.more }
-                // a ready model stops from home too (one starting has Stop as its first button)
-                Btn { label: r.stop ? "Stop" : ""; action: r.stop || ""; danger: true }
               }
             }
           }

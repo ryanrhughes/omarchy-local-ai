@@ -489,9 +489,14 @@ function card(s, d) {
   var known = cards.every(function(g) { return g.usedMiB != null })
   var used = cards.reduce(function(a, g) { return a + (g.usedMiB || 0) / 1024 }, 0)
   var total = cards.reduce(function(a, g) { return a + (g.vramGb || 0) }, 0)
-  var r = { type: "run", name: title(d), quant: quantOf(d), family: d.family, line: all.line || [], more: "more|" + d.id,
+  // its token line, only when it rises: a model whose tokens came at once draws a flat rule, which reads as a frame
+  var ln = all.line || [], rises = ln.length > 2 && Math.max.apply(null, ln) > Math.min.apply(null, ln)
+  // a card that shares the host memory has the machine's memory as its own: what the model holds of it says more
+  var uni = cards.some(function(g) { return g.unified })
+  var r = { type: "run", name: title(d), quant: quantOf(d), family: d.family, line: rises ? ln : [], more: "more|" + d.id,
     gpu: (cards.length > 1 ? cards.length + " × " : "") + (cards[0] ? cards[0].name : "GPU"),
     mem: d.share && s.host && s.host.ramGb ? Math.round(d.share * s.host.ramGb) + " GB shared"
+      : uni && d.fullGb != null ? Math.round(d.fullGb) + " GB reserved"
       : total && !working(d) ? (known ? Math.round(used) + " / " : "") + total + " GB" : "" }
   if (d.state === "ready") {
     r.chips = [all.decode ? { icon: "speed", text: all.decode + " tok/s" } : null, { icon: "tokens", text: k(all.tokens) }].filter(Boolean)
