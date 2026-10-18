@@ -127,6 +127,19 @@ MODE=edit cmd_registry >/dev/null
 [[ $(jq -c --arg h "$hw" '[.hardware[$h].recipes[].id]' "$CATALOG") == "$(jq -c --arg h "$hw" '[.hardware[$h].recipes[].id] | reverse' "$SOURCE")" ]] ||
   { echo "not ok - a reordered card kind"; exit 1; }
 echo 'ok - a refresh can relabel (checked display fields only), withdraw and reorder shipped recipes'
+# a build label, a measured speed and what the registry says of a model are display fields too: checked, else the shipped ones
+EDIT="$(sel "$plain").quant = \"FP8\" | $(sel "$plain").speed = {decode: 23.8, prefill: 329, at: \"2026-10-15\", source: \"lab\"}
+  | $(sel "$plain").model = {id: \"m\", name: \"Model\", about: \"$(head -c 500 /dev/zero | tr '\0' a)\", goodFor: \"agents\"}"
+MODE=edit cmd_registry >/dev/null
+[[ $(jq -c --arg id "$plain" '.hardware[].recipes[] | select(.id == $id) | [.quant, .speed.decode, .speed.source, .model.name, (.model.about | length)]' "$CATALOG") == '["FP8",23.8,"lab","Model",500]' ]] ||
+  { echo "not ok - a refresh did not carry a build, speed or model"; exit 1; }
+for EDIT in "$(sel "$plain").speed = {decode: \"fast\", source: \"lab\"}" "$(sel "$plain").speed = {decode: 20, source: \"rumour\"}" \
+  "$(sel "$plain").speed = {decode: 20, at: \"yesterday\", source: \"lab\"}" "$(sel "$plain").model = {name: \"<img src=x>\"}" \
+  "$(sel "$plain").model = {name: \"M\", script: \"x\"}" "$(sel "$plain").model = {about: \"$(head -c 700 /dev/zero | tr '\0' a)\"}" \
+  "$(sel "$plain").quant = \"a\\u202eb\""; do
+  shipped "$plain" || { echo "not ok - a refresh took an unchecked build, speed or model: ${EDIT:0:200}"; exit 1; }
+done
+echo 'ok - a refresh carries a checked build label, measured speed and model description, and refuses one that fails its check'
 
 # The same id on every refresh; nothing sent when turned off or with DO_NOT_TRACK; an unreachable counter fails nothing
 (( $(jq -s 'map(.id) | unique | length' "$TMP/pings") == 1 && $(wc -l <"$TMP/pings") > 1 )) ||

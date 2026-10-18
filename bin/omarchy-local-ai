@@ -181,7 +181,8 @@ ping() {
 # Fetch only the registry's data, pinned to the commit resolved before downloading; every recipe checked before it
 # replaces the catalog.
 cmd_registry() (
-  local sha tmp r
+  # this fork's registry, which carries each recipe's build, measured speed and model
+  local sha tmp r repo=${LOCAL_AI_REGISTRY:-ryanrhughes/local-ai-registry}
   umask 022
   install -d -m 755 "${CATALOG%/*}"
   exec 8>"${CATALOG%/*}/update.lock"
@@ -190,10 +191,10 @@ cmd_registry() (
   tmp=$(mktemp "${CATALOG%/*}/.recipes.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
   sha=$(curl -fsSL --proto '=https' --connect-timeout 10 --max-time 30 --max-filesize 1048576 \
-    https://api.github.com/repos/sybil-solutions/local-ai-registry/commits/main | jq -er .sha) || die "could not check the registry; existing models are unchanged"
+    "https://api.github.com/repos/$repo/commits/main" | jq -er .sha) || die "could not check the registry; existing models are unchanged"
   [[ $sha =~ ^[0-9a-f]{40}$ ]] || die "invalid registry revision"
   curl -fsSL --proto '=https' --connect-timeout 10 --max-time 60 --max-filesize 10485760 \
-    "https://raw.githubusercontent.com/sybil-solutions/local-ai-registry/$sha/plugin/v3/recipes.json" >"$tmp" ||
+    "https://raw.githubusercontent.com/$repo/$sha/plugin/v3/recipes.json" >"$tmp" ||
     die "could not download the registry; existing models are unchanged"
   jq -e '.schemaVersion == "omarchy-local-ai/recipes/3" and (.hardware | type == "object" and length > 0)
     and all(.hardware[]; (.recipes | type == "array" and length > 0))
@@ -204,15 +205,18 @@ cmd_registry() (
   # recipe of the same id under the same card kind becomes THAT SHIPPED RECIPE, with only these display fields taken
   # from the registry, each when it passes its check (else the shipped value stays): name, family and format (text
   # of at most 120 characters, no control characters, bidi controls, line separators or markup), sizeGb (a finite
-  # number, not negative), aa (a finite number), reported and each capability the shipped recipe has (booleans).
+  # number, not negative), aa (a finite number), reported and each capability the shipped recipe has (booleans), quant
+  # (text), speed (decode and prefill finite numbers, at a date, source lab, reported or legacy) and model (id, name,
+  # released and hf as text; about and goodFor the same at up to 600 characters).
   # Everything else, its image, launch, weights, serving, needs and the rest, is the shipped recipe's; each card kind
   # keeps its shipped match. A recipe the plugin does not ship is left out, not fatal; one listed twice counts once.
   jq -e --slurpfile own "$PANEL/recipes.json" '.gateway.image == $own[0].gateway.image' "$tmp" >/dev/null ||
     die "the registry changed the gateway; update the plugin to get it"
   r=$(jq --slurpfile own "$PANEL/recipes.json" '
     # no C0 or C1 controls, no bidirectional overrides, isolates or marks, no line or paragraph separators
-    def text: type == "string" and length <= 120 and (test("[<>]") | not) and (explode | all(. >= 32 and (. < 127 or . > 159)
+    def text($n): type == "string" and length <= $n and (test("[<>]") | not) and (explode | all(. >= 32 and (. < 127 or . > 159)
       and (. < 8234 or . > 8238) and (. < 8294 or . > 8297) and (. < 8206 or . > 8207) and . != 8232 and . != 8233 and . != 1564));
+    def text: text(120);
     def finite: type == "number" and (isinfinite | not) and (isnan | not);
     $own[0].hardware as $shipped
     | .hardware |= (with_entries(select($shipped[.key] != null) | .key as $h
@@ -222,6 +226,15 @@ cmd_registry() (
             | if ($r.sizeGb | finite and . >= 0) then .sizeGb = $r.sizeGb else . end
             | if ($r.aa | finite) then .aa = $r.aa else . end
             | if ($r.reported | type == "boolean") then .reported = $r.reported else . end
+            | if ($r.quant | text) then .quant = $r.quant else . end
+            | if ($r.speed | type == "object") and ($r.speed.decode | finite and . > 0)
+                and ($r.speed.prefill == null or ($r.speed.prefill | finite and . > 0))
+                and ($r.speed.at == null or ($r.speed.at | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")))
+                and ($r.speed.source | IN("lab", "reported", "legacy"))
+              then .speed = ($r.speed | {decode, prefill, at, source} | with_entries(select(.value != null))) else . end
+            | if ($r.model | type == "object") and all($r.model | to_entries[]; (.key | IN("id", "name", "released", "hf")) and (.value | text)
+                or (.key | IN("about", "goodFor")) and (.value | text(600)))
+              then .model = $r.model else . end
             | if (.capabilities | type == "object") and ($r.capabilities | type == "object") then
                 .capabilities |= with_entries(.key as $k | if ($r.capabilities[$k] | type == "boolean") then .value = $r.capabilities[$k] else . end)
               else . end]
