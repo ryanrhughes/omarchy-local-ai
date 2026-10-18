@@ -1982,7 +1982,7 @@ def util: (.launch.arguments // []) as $a | ($a | index("--gpu-memory-utilizatio
   | if $i != null then ($a[$i + 1] | tonumber? // null)
     else first($a[] | select(type == "string" and startswith("--gpu-memory-utilization=")) | ltrimstr("--gpu-memory-utilization=") | tonumber?) // null end;
 def sharegb($h): util as $m | (.serving.kvTokens // 0) as $k | (.serving.ctxTokens // 0) as $c | (.sizeGb // 0) as $w | ($h.ramGb // 0) as $t
-  | ($h.fit[.id] // null) as $f | (1073741824 / 1e9) as $gib
+  | (($h.fit // {})[.id // ""] // null) as $f | (1073741824 / 1e9) as $gib
   | if .engine != "vllm" or $m == null or $k <= 0 or $c <= 0 or $t <= 0 then null
     elif $f != null and ($f.util | type == "number") and ($f.cacheGiB | type == "number") and ($f.cacheGiB > 0) and ($f.tokens | type == "number") and $f.tokens > 0
     then [$f.util * $t - $f.cacheGiB * $gib + $f.cacheGiB * $gib / $f.tokens * $c * 1.1 + 2, $m * $t] | min | . * 10 | ceil / 10
