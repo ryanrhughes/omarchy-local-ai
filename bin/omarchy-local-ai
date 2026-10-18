@@ -387,7 +387,10 @@ MATCH='def gpus($nv; $xe; $am): ($nv | split("\n") | map(select(length > 0) | sp
     | $x + {key: ($x.backend + ":" + ($x.index | tostring)), hw: $hw,
         totalMiB: (if $uni then $ram else $x.totalMiB end), usedMiB: (if $uni then null else $x.usedMiB end),
         vramGb: (((if $uni then $ram else $x.totalMiB end) / 1024) | round),
-        name: ($x.product | gsub("^(NVIDIA GeForce |NVIDIA |Intel |AMD Radeon |AMD )"; ""))}];'
+        # the name the catalog gives its kind (RTX Spark N1X), else the product without its maker or a trailing
+        # parenthesis (nvidia-smi says "NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)")
+        name: (if $hw != "" and ($r.hardware[$hw].name // "") != "" then $r.hardware[$hw].name
+          else $x.product | gsub("^(NVIDIA GeForce |NVIDIA |Intel |AMD Radeon |AMD )"; "") | gsub(" \\([^)]*\\)$"; "") end)}];'
 
 # Every GPU, matched and reserved by any running container, regardless of account or labels.
 # Unknown NVIDIA UUID/count requests reserve all NVIDIA cards; memory alone cannot detect idle allocations.
@@ -1836,10 +1839,13 @@ adopt() {
 }
 
 # what the widget needs of a recipe
-SUMMARY='def downloaded($h): [.weights[]? | if .layout == "hub" then "" else "\(.repository | gsub("/"; "--"))@\(.revision[:12])\(if (.dir // "") != "" then "/" + .dir else "" end)" end] as $w
-  | ($w | length) > 0 and all($w[]; . as $x | $x != "" and ($h.have | index($x + "/.verified2")) != null);
-def summary($h): {id, name, family, cards: (.cards // 1), format, engine, sizeGb, ctx: .serving.ctxTokens, caps: .capabilities, reported: (.reported // false), aa,
-  needs, weights: [.weights[]? | {repository, revision}], unfit: unfit($h), downloaded: downloaded($h)};'
+SUMMARY='def folders: [.weights[]? | if .layout == "hub" then "" else "\(.repository | gsub("/"; "--"))@\(.revision[:12])\(if (.dir // "") != "" then "/" + .dir else "" end)" end];
+def downloaded($h): folders as $w | ($w | length) > 0 and all($w[]; . as $x | $x != "" and ($h.have | index($x + "/.verified2")) != null);
+# the bytes of its weights already on disk, checked or not (a download under way, or one an earlier version checked)
+def ondisk($h): [folders[] | $h.got[.] // 0] | add // 0 | . / 1e9 | . * 100 | floor / 100;
+def summary($h): {id, name, family, cards: (.cards // 1), format, engine, sizeGb, ctx: .serving.ctxTokens, kv: .serving.kvTokens, caps: .capabilities,
+  reported: (.reported // false), aa, quant, speed, model, needs, weights: [.weights[]? | {repository, revision}], unfit: unfit($h),
+  downloaded: downloaded($h), onDiskGb: ondisk($h)};'
 
 # downloads: each download under way or failed, with its id; one whose worker is gone has stopped
 downloads() {
@@ -1938,6 +1944,17 @@ cmd_snapshot() {
          # the registry lists the recipes of a kind best first: the first on one card is its recommended model
          models: [$rec[0].hardware[.[0].hw].recipes[] | select((.cards // 1) == 1) | summary($host)],
          groups: [$rec[0].hardware[.[0].hw].recipes[] | select((.cards // 1) > 1) | summary($host)]}],
+       # models the catalog has, tested on other cards but on none here, that would fit this machine: on a card that
+       # shares the host memory four fifths of it, else its largest card. One entry a model, its smallest build.
+       untested: (([$g[] | .hw | select(. != "")] | unique) as $mine
+         | ([$mine[] as $h | $rec[0].hardware[$h].recipes[] | .model.id // .name]) as $have
+         | (if any($g[]; .unified // false) then $host.ramGb * 0.8 else ([$g[] | .vramGb // 0] | max // 0) end) as $room
+         | [$rec[0].hardware | to_entries[] | select(.key as $k | $mine | index($k) | not) | (.value.name // .key) as $card
+             | .value.recipes[] | select((.cards // 1) == 1 and (.needs == null)) | {key: (.model.id // .name), r: ., card: $card}]
+         | group_by(.key) | map(select(.[0].key as $m | $have | index($m) | not))
+         | map(sort_by(.r.sizeGb) | {id: .[0].key, name: (.[0].r.model.name // .[0].r.name), family: .[0].r.family, aa: .[0].r.aa,
+             quant: .[0].r.quant, format: .[0].r.format, sizeGb: .[0].r.sizeGb, hf: (.[0].r.model.hf // ""), cards: (map(.card) | unique)})
+         | map(select(.sizeGb != null and .sizeGb <= $room)) | sort_by(-(.aa // 0))),
        deployments: $deps}'
   }
   g=$(gpus "$([[ $rstate == ready ]] || echo none)") || die "could not check the GPUs; try again"

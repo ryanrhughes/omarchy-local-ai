@@ -15,7 +15,7 @@ now() { echo 2026-09-29T00:00:00Z; }
 die() { echo "local-ai: $*" >&2; exit 1; }
 eval "$(sed -n '/^policy() {/,/^# cdi_stale:/p' "${BACKEND:-$ROOT/bin/omarchy-local-ai}" | sed '$d')"
 # what a refresh draws the panel with before it installs a catalog
-eval "$(sed -n '/^PREP_CONTRACT=/,/^  | join("; ");'"'"'$/p;/^SUMMARY=/,/^  needs, weights/p' "${BACKEND:-$ROOT/bin/omarchy-local-ai}")"
+eval "$(sed -n '/^PREP_CONTRACT=/,/^  | join("; ");'"'"'$/p;/^SUMMARY=/,/^  downloaded: downloaded($h), onDiskGb/p' "${BACKEND:-$ROOT/bin/omarchy-local-ai}")"
 host() { echo '{"ramGb":64,"freeRamGb":60,"diskFreeGb":500,"disk":"nvme","cpus":16,"prepared":[],"have":[],"got":{}}'; }
 # usage reports are off until the user turns them on; these cases have, and the last ones check what happens before
 echo '{"ping": "on"}' >"$STATE/settings.json"
