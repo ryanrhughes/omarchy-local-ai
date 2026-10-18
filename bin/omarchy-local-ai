@@ -409,11 +409,12 @@ MATCH='def gpus($nv; $xe; $am): ($nv | split("\n") | map(select(length > 0) | sp
 # Unknown NVIDIA UUID/count requests reserve all NVIDIA cards; memory alone cannot detect idle allocations.
 # `gpus none` skips the Docker check, for a snapshot taken while Docker cannot be asked.
 gpus() {
-  local ids claims='[]' p
+  local ids claims='[]' p skip
   if [[ ${1:-} != none ]] && docker_reachable; then
     ids=$(docker ps -q) || die "could not check Docker GPU allocations; try again"
-    # our own engines a start beside them may share a card with (shared_ok)
-    [[ -z ${SHARED_OK:-} || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $SHARED_OK) <<<"$ids" || true)
+    # our own engines a start beside them may share a card with (shared_skip)
+    skip=$(shared_skip)
+    [[ -z $skip || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $skip) <<<"$ids" || true)
     if [[ -n $ids ]]; then
       # Read only allocation fields, never container environments or credentials.
       # shellcheck disable=SC2086
@@ -452,9 +453,10 @@ host() {
   for d in "$MODELS"/*/ "$MODELS"/*/*/; do got+=("${d#"$MODELS"/}" "$(du -sb -- "$d" 2>/dev/null | cut -f1)"); done
   prepared=$(jq -s 'map(select(type == "object"))' "$MODELS"/prepared/*/.complete.json 2>/dev/null) || prepared='[]'
   jq -nc --argjson r "${ram:-0}" --argjson f "${free:-0}" --argjson a "${avail:-0}" --arg d "$disk" --argjson prepared "$prepared" \
+    --argjson fit "$(jq -c 'if type == "object" then . else {} end' "$STATE/fit.json" 2>/dev/null || echo '{}')" \
     --argjson cpus "$(nproc 2>/dev/null || echo 0)" --arg cpuName "$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)" \
     'def gb: . * 10 | floor / 10; {ramGb: ($r * 1024 / 1e9 | gb), freeRamGb: ($f * 1024 / 1e9 | gb), diskFreeGb: ($a / 1e9 | gb), disk: $d, cpus: $cpus, cpuName: $cpuName,
-      prepared: $prepared, have: [$ARGS.positional[] | select(endswith("/.verified2"))],
+      prepared: $prepared, fit: $fit, have: [$ARGS.positional[] | select(endswith("/.verified2"))],
       got: ([$ARGS.positional[] | select(endswith("/.verified2") | not)] | [range(0; length; 2) as $i | {(.[$i] | rtrimstr("/")): (.[$i + 1] | tonumber? // 0)}] | add // {})}' \
     --args ${have[@]+"${have[@]}"} ${got[@]+"${got[@]}"}
 }
@@ -646,6 +648,26 @@ preparer() { printf '%s-prepare' "$(network "$1")"; }
 kv() {
   docker logs "$(engine "$1")" 2>&1 | grep -m1 -oE 'max_total_num_tokens=[0-9]+|GPU KV cache size: [0-9,]+ tokens' | tr -dc 0-9 || true
 }
+# fit <id> <recipe>: what a vLLM start that reached ready measured, kept per recipe in fit.json for sharegb: the memory
+# fraction it was given, the cache memory vLLM found left of it (GiB) and the tokens that holds. Nothing for another
+# engine, or a log that does not say.
+fit() {
+  local logs util gib tokens
+  logs=$(docker logs "$(engine "$1")" 2>&1 | grep -E "Available KV cache memory: |GPU KV cache size: |'gpu_memory_utilization': ") || return 0
+  util=$(grep -m1 -oE "'gpu_memory_utilization': [0-9.]+" <<<"$logs" | grep -oE '[0-9.]+$') || return 0
+  gib=$(grep -m1 -oE 'Available KV cache memory: [0-9.]+ GiB' <<<"$logs" | grep -oE '[0-9.]+') || return 0
+  tokens=$(grep -m1 -oE 'GPU KV cache size: [0-9,]+ tokens' <<<"$logs" | tr -dc 0-9) || return 0
+  [[ $util =~ ^0?\.[0-9]+$ && $gib =~ ^[0-9]+(\.[0-9]+)?$ && $tokens =~ ^[0-9]+$ ]] || return 0
+  (
+    exec 6>>"$STATE/fit.lock"
+    flock -w 5 6 || exit 0
+    jq -c --arg id "$(jq -r .id <<<"$2")" --argjson u "$util" --argjson g "$gib" --argjson n "$tokens" --arg at "$(now)" \
+      '(if type == "object" then . else {} end) | .[$id] = {util: $u, cacheGiB: $g, tokens: $n, at: $at}' \
+      "$STATE/fit.json" 2>/dev/null >"$STATE/fit.json.$$" || jq -nc --arg id "$(jq -r .id <<<"$2")" --argjson u "$util" --argjson g "$gib" \
+      --argjson n "$tokens" --arg at "$(now)" '{($id): {util: $u, cacheGiB: $g, tokens: $n, at: $at}}' >"$STATE/fit.json.$$"
+    mv -f "$STATE/fit.json.$$" "$STATE/fit.json"
+  ) 2>/dev/null || true
+}
 prepared_contract() { jq -cS "$PREP_CONTRACT prepared_contract" <<<"$1"; }
 prepared_path() { printf '%s/prepared/%s' "$MODELS" "$(prepared_contract "$1" | sha256sum | cut -c1-64)"; }
 managed_paths() {
@@ -808,7 +830,7 @@ allocation_lock() {
 # device, say), which counts as every card, as gpus() counts it. Otherwise this one is removed and the start ends.
 # Two accounts that take a card at the same moment both read that order from Docker, so exactly one start goes on.
 settle() {
-  local c=$1 k u ids mine v cards=() f='{"devices":{{json .HostConfig.Devices}},"requests":{{json .HostConfig.DeviceRequests}},"privileged":{{json .HostConfig.Privileged}}}'
+  local c=$1 k u ids mine v skip cards=() f='{"devices":{{json .HostConfig.Devices}},"requests":{{json .HostConfig.DeviceRequests}},"privileged":{{json .HostConfig.Privileged}}}'
   shift
   for k in "$@"; do
     [[ $k == nvidia:* ]] || continue
@@ -818,7 +840,8 @@ settle() {
   ids=$(docker ps -q --filter status=running --filter status=created --filter status=restarting \
     --filter status=paused --filter "before=$c") ||
     die "could not check Docker GPU allocations; try again"
-  [[ -z ${SHARED_OK:-} || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $SHARED_OK) <<<"$ids" || true)
+  skip=$(shared_skip)
+  [[ -z $skip || -z $ids ]] || ids=$(grep -vxF -f <(printf '%s\n' $skip) <<<"$ids" || true)
   [[ -n $ids ]] || return 0
   mine=$(docker inspect --format "$f" "$c") || die "could not check Docker GPU allocations; try again"
   # shellcheck disable=SC2086
@@ -860,7 +883,27 @@ phase_start() (
   local share
   share=$(jq -r '.share // empty | tostring' "$(dir_of "$id")/config.json" 2>/dev/null) || share=""
   [[ -z $share || $share =~ ^0\.[0-9]+$ ]] || die "invalid share $share"
-  [[ -z $share ]] || SHARED_OK=$(shared_ok "$@" | grep -vxF -f <(docker ps -q --filter "name=^/$(engine "$id")$" 2>/dev/null; echo none) || true)
+  if [[ -n $share ]]; then
+    SHARED_KEYS="$*"
+    SHARED_SELF=$id
+    # a model beside it still starting holds only part of its share: wait until it is up (or failed), then what is
+    # free is what is left, and the desktop keeps 6 GB of it
+    local other ofrac busy t0=$SECONDS h
+    while :; do
+      busy=""
+      while IFS=$'\t' read -r other ofrac; do
+        [[ $other != "$id" && $(jq -r .state "$(dir_of "$other")/status.json" 2>/dev/null) =~ ^(download|starting)$ ]] && busy=$other
+      done < <(beside "$@")
+      [[ -n $busy ]] || break
+      ((SECONDS - t0 < 1800)) || die "$(jq -r '.serve.name // .id' "$(dir_of "$busy")/config.json") beside it did not finish starting in 30 minutes"
+      echo "waiting for $(jq -r '.serve.name // .id' "$(dir_of "$busy")/config.json") beside it to start"
+      [[ ! -e $(dir_of "$id")/cancel ]] || die "start cancelled"
+      sleep 5
+    done
+    h=$(host)
+    jq -ne --argjson h "$h" --argjson f "$share" '$h.freeRamGb - $f * $h.ramGb >= 6' >/dev/null ||
+      die "not enough free memory to run $(jq -r .name <<<"$r") alongside: it needs $(jq -nr --argjson h "$h" --argjson f "$share" '$f * $h.ramGb | round') GB and $(jq -nr --argjson h "$h" '$h.freeRamGb - 6 | floor') GB is free beside the desktop; close something and try again"
+  fi
   v=$(policy "$r")
   [[ $v == "ok" ]] || die "recipe refused: $v"
   (($# == $(jq -r '.cards // 1' <<<"$r"))) || die "this recipe runs on $(jq -r '.cards // 1' <<<"$r") card(s)"
@@ -1117,6 +1160,7 @@ worker_run() {
   # vLLM puts thinking in `reasoning`, older engines in `reasoning_content`; 200 tokens can all be thinking
   jq -e '.choices[0].message | any(.content, .reasoning, .reasoning_content; type == "string" and length > 0)' <<<"$reply" >/dev/null ||
     fail "the model returned no answer"
+  fit "$WID" "$r"
   # what the cache holds, so Open keeps the agent's conversations inside it
   k=$(kv "$WID")
   if [[ -n $k ]]; then
@@ -1134,16 +1178,26 @@ beside() {
   local f
   for f in "$STATE"/deploy/*/config.json; do
     [[ -f $f ]] || continue
-    jq -r --args '. as $c | select(any(.keys[]; . as $k | $ARGS.positional | index($k) != null)) | "\(.id)\t\($c.share // "")"' "$f" "$@" 2>/dev/null
+    jq -r '. as $c | select(any(.keys[]; . as $k | $ARGS.positional | index($k) != null)) | "\(.id)\t\($c.share // "")"' "$f" --args "$@" 2>/dev/null
   done
 }
-# shared_ok <keys...>: the containers of this account's engines that run shared on these cards, which a start beside
-# them leaves out of every check that a card is taken (gpus, settle); another program's hold on a card still counts
+# shared_ok <keys...>: the containers of this account's engines that run shared on these cards
 shared_ok() {
   local id share
   while IFS=$'\t' read -r id share; do
     [[ -n $share ]] && docker ps -q --filter "name=^/$(engine "$id")$" 2>/dev/null
   done < <(beside "$@")
+}
+# shared_skip: for a start beside others (SHARED_KEYS, its cards; SHARED_SELF, its own id once it has one), the engines
+# every check that a card is taken leaves out (gpus, settle), read when the check runs, so one that started a moment
+# before under the allocation lock counts; another program's hold on a card still counts
+shared_skip() {
+  [[ -n ${SHARED_KEYS:-} ]] || return 0
+  # shellcheck disable=SC2086
+  shared_ok $SHARED_KEYS | grep -vxF -f <(
+    [[ -z ${SHARED_SELF:-} ]] || docker ps -q --filter "name=^/$(engine "$SHARED_SELF")$" 2>/dev/null
+    echo none
+  ) || true
 }
 
 cmd_run() {
@@ -1179,16 +1233,16 @@ cmd_run() {
     done < <(beside "${keys[@]}")
     jq -ne --argjson u "$used" --argjson f "$frac" '$u + $f <= 0.72' >/dev/null ||
       die "not enough memory to run $(jq -r .name <<<"$r") alongside: it needs $(jq -nr --argjson f "$frac" '$f * 100 | round')% of it, $(jq -nr --argjson u "$used" '72 - $u * 100 | round')% is left"
-    # and what is free now: a model still starting has not taken its share yet, and the desktop keeps 6 GB
-    local pending=0 h
+    # and what is free now, leaving the desktop 6 GB, when nothing beside it is still starting (one that is has not
+    # taken all of its share yet: the start waits for it and checks then, phase_start)
+    local pending="" h
     while IFS=$'\t' read -r other ofrac; do
-      [[ $(jq -r .state "$(dir_of "$other")/status.json" 2>/dev/null) == ready ]] ||
-        pending=$(jq -nr --argjson a "$pending" --argjson b "$ofrac" '$a + $b')
+      [[ $(jq -r .state "$(dir_of "$other")/status.json" 2>/dev/null) =~ ^(ready|error)$ ]] || pending=$other
     done < <(beside "${keys[@]}")
     h=$(host)
-    jq -ne --argjson h "$h" --argjson p "$pending" --argjson f "$frac" '$h.freeRamGb - ($p + $f) * $h.ramGb >= 6' >/dev/null ||
-      die "not enough free memory to run $(jq -r .name <<<"$r") alongside: it needs $share GB and $(jq -nr --argjson h "$h" --argjson p "$pending" '$h.freeRamGb - $p * $h.ramGb - 6 | floor') GB is free beside the desktop; close something and try again"
-    SHARED_OK=$(shared_ok "${keys[@]}")
+    [[ -n $pending ]] || jq -ne --argjson h "$h" --argjson f "$frac" '$h.freeRamGb - $f * $h.ramGb >= 6' >/dev/null ||
+      die "not enough free memory to run $(jq -r .name <<<"$r") alongside: it needs $share GB and $(jq -nr --argjson h "$h" '$h.freeRamGb - 6 | floor') GB is free beside the desktop; close something and try again"
+    SHARED_KEYS="${keys[*]}"
   fi
   g=$(gpus)
   for k in "${keys[@]}"; do
@@ -1918,15 +1972,22 @@ def downloaded($h): folders as $w | ($w | length) > 0 and all($w[]; . as $x | $x
 # the bytes of its weights already on disk, checked or not (a download under way, or one an earlier version checked)
 def ondisk($h): [folders[] | $h.got[.] // 0] | add // 0 | . / 1e9 | . * 100 | floor / 100;
 # sharegb($h): what a vLLM recipe takes of a card that shares the host memory when it runs beside another model there:
-# its weights, 3 GB for the engine, and cache for its whole context and a tenth more, at the bytes a token takes when
-# the memory it was validated with holds the cache it states; never more than it was validated with. null for a recipe
-# that cannot say (another engine, no memory fraction, no cache size).
+# what vLLM keeps besides its cache, and cache for its whole context and a tenth more, with 2 GB to spare. Both come
+# from a start of this recipe on this machine when there has been one ($h.fit, measured: the memory it was given, the
+# cache memory vLLM said was left of it and the tokens that holds); until then, twice its weights (an eager load counts
+# the copy it reads from against the engine while vLLM measures) and 3 GB, and the bytes a token takes when the memory
+# it was validated with holds the cache it states. Never more than it was validated with. null for a recipe that
+# cannot say (another engine, no memory fraction, no cache size).
 def util: (.launch.arguments // []) as $a | ($a | index("--gpu-memory-utilization")) as $i
   | if $i != null then ($a[$i + 1] | tonumber? // null)
     else first($a[] | select(type == "string" and startswith("--gpu-memory-utilization=")) | ltrimstr("--gpu-memory-utilization=") | tonumber?) // null end;
 def sharegb($h): util as $m | (.serving.kvTokens // 0) as $k | (.serving.ctxTokens // 0) as $c | (.sizeGb // 0) as $w | ($h.ramGb // 0) as $t
-  | if .engine != "vllm" or $m == null or $k <= 0 or $c <= 0 or $t <= 0 or ($m * $t - $w - 3) <= 0 then null
-    else (($m * $t - $w - 3) / $k) as $b | [$w + 3 + $b * ([$c * 1.1, $k] | min), $m * $t] | min | . * 10 | ceil / 10 end;
+  | ($h.fit[.id] // null) as $f | (1073741824 / 1e9) as $gib
+  | if .engine != "vllm" or $m == null or $k <= 0 or $c <= 0 or $t <= 0 then null
+    elif $f != null and ($f.util | type == "number") and ($f.cacheGiB | type == "number") and ($f.cacheGiB > 0) and ($f.tokens | type == "number") and $f.tokens > 0
+    then [$f.util * $t - $f.cacheGiB * $gib + $f.cacheGiB * $gib / $f.tokens * $c * 1.1 + 2, $m * $t] | min | . * 10 | ceil / 10
+    elif ($m * $t - 2 * $w - 3) <= 0 then null
+    else (($m * $t - 2 * $w - 3) / $k) as $b | [2 * $w + 3 + $b * ([$c * 1.1, $k] | min), $m * $t] | min | . * 10 | ceil / 10 end;
 def summary($h): {id, name, family, cards: (.cards // 1), format, engine, sizeGb, ctx: .serving.ctxTokens, kv: .serving.kvTokens, caps: .capabilities,
   reported: (.reported // false), aa, quant, speed, model, needs, weights: [.weights[]? | {repository, revision}], unfit: unfit($h),
   downloaded: downloaded($h), onDiskGb: ondisk($h), shareGb: sharegb($h), fullGb: (util as $m | if $m != null and .engine == "vllm" then $m * ($h.ramGb // 0) | . * 10 | round / 10 else null end)};'
@@ -2013,7 +2074,7 @@ cmd_snapshot() {
         + ([$rec[0].hardware[].recipes[] | select(.id == $rid)][0] // {} | summary($host) | del(.id, .unfit) | with_entries(select(.value != null))) + .]) as $deps
     | ([$deps[].keys[]]) as $busy
     | ([$g[] | select((.held or (.usedMiB // 0) > 2048) and (.key as $k | $busy | index($k) == null)) | .key]) as $taken
-    | {version: $version, setupError: $setupError, readiness: {state: $rstate, message: $rmsg}, host: ($host | del(.have, .got)), week: $tokens.week, total: $tokens.total, life: $tokens.life, defaults: {agent: $agent, folder: $folder}, reporting: $reporting, agents: $agents, folders: $folders, pins: $pins, tailnet: $ts,
+    | {version: $version, setupError: $setupError, readiness: {state: $rstate, message: $rmsg}, host: ($host | del(.have, .got, .fit)), week: $tokens.week, total: $tokens.total, life: $tokens.life, defaults: {agent: $agent, folder: $folder}, reporting: $reporting, agents: $agents, folders: $folders, pins: $pins, tailnet: $ts,
        cdi: (if $cdi == "" then null else ($cdi | split("\t") | {spec: .[0], why: .[1]}) end),
        downloads: $downloads, updates: $outdated.updates, updatesAt: $outdated.at,
        # what a recipe this version no longer offers left behind: folders to remove, downloads to clear

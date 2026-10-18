@@ -451,6 +451,11 @@ grep -qE "cannot share a card|runs on its own there|has memory of its own" "$TMP
 [[ $(ls -d "$STATE"/deploy/*/ | wc -l) == 1 ]] || fail "alongside left a deployment" "$(ls "$STATE/deploy")"
 "$CLI" run "$ID" nvidia:0 beside 2>"$TMP/err" && fail "an unknown run mode"
 pass "running alongside is refused on a card with memory of its own, and leaves the running model alone"
+# beside lists each model of this account on the cards asked about, with the share it was started with; the budget and
+# every check that a card is taken read it
+b=$(STATE=$STATE bash -c 'source <(sed -n "/^beside() {/,/^}/p" "$1"); beside nvidia:0; echo --; beside nvidia:9' _ "$ROOT/bin/omarchy-local-ai")
+[[ $b == "$ID"$'\t'$'\n'-- ]] || fail "beside" "$b"
+pass "beside names the model on a card and nothing on a card without one"
 
 "$CLI" run "$ID" nvidia:2
 wait_for ready "$ID--2"
