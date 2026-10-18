@@ -167,15 +167,20 @@ test('a model page: name, one line of state, one action (Open and Stop when it r
   assert.deepEqual(free[1].items.map(a=>[a.label,a.action]),[['Start ›','run|test|nvidia:0']]);
   assert.equal(free[0].note,'starts with a 0 GB download');
 });
-test('back and forward step through the views, as in a browser', () => {
+test('a page has one way back, up to where it belongs: the tab it was opened from, the folder to what it is for', () => {
   const qml=fs.readFileSync(process.argv[3],'utf8');
-  const ctx={ui:{view:'home',id:'',key:'',open:''},past:[],ahead:[],topTick:0,revealed:false}; vm.createContext(ctx);
-  for (const name of ['here','back','forward','go','nav']) { const fn=qml.match(new RegExp('function '+name+'\\([^)]*\\) \\{[^]*?\\n  \\}|function '+name+'\\([^)]*\\) \\{.*\\}')); assert(fn,name+' missing'); vm.runInContext(fn[0],ctx); }
+  const ctx={ui:{view:'home',id:'',key:'',open:''},topTick:0,revealed:false}; vm.createContext(ctx);
+  const fn=qml.match(/function nav\([^)]*\) \{[^]*?\n  \}/); assert(fn,'nav missing'); vm.runInContext(fn[0],ctx);
   ctx.nav({view:'models',id:''}); ctx.nav({view:'kind',id:'hw',model:'x'});
-  assert.deepEqual(ctx.past.map(p=>p.view),['home','models']);
-  ctx.back(); assert.equal(ctx.ui.view,'models'); ctx.back(); assert.equal(ctx.ui.view,'home');
-  ctx.forward(); assert.equal(ctx.ui.view,'models'); ctx.forward(); assert.deepEqual([ctx.ui.view,ctx.ui.model],['kind','x']);
-  ctx.back(); ctx.nav({view:'gpus',id:''}); assert.equal(ctx.ahead.length,0);
+  assert.equal(ctx.ui.from,'models');
+  assert.deepEqual(m.build(s,{...ctx.ui,view:'kind',id:'test',key:gpu.key}).up,{label:'models',action:'models'});
+  ctx.nav({view:'home',id:''}); ctx.nav({view:'gpus',id:''});
+  assert.deepEqual(m.build(s,ctx.ui).up,{label:'home',action:'home'});
+  assert.deepEqual(m.build(s,{view:'folder',id:'test'}).up,{label:'model',action:'more|test'});
+  assert.deepEqual(m.build(s,{view:'folder',id:''}).up,{label:'agents',action:'agents'});
+  assert(!m.build(s,{view:'home'}).up && !m.build(s,{view:'models'}).up);
+  // no history to step through: the header has no back and forward arrows
+  assert(!/function back\(|function forward\(|"forward"/.test(qml));
 });
 process.exitCode = failed ? 1 : 0;
 JS

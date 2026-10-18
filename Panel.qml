@@ -114,26 +114,20 @@ Panel {
   }
   // bumped when a view changes, so each body scrolls back to its top
   property int topTick: 0
-  // Escape: clear the search, else back home, else close
+  // Escape: clear the search, else up to where this page belongs, else the models tab back to home, else close
   function stepBack(close) {
     if (ui.query) ui = Object.assign({}, ui, { query: "" })
+    else if (view.up) activate(view.up.action)
     else if (ui.view !== "home") home()
-    else close()
+    else if (close) close()
   }
 
-  // a new view starts at its top with nothing chosen; within a view, a chosen model stays chosen
-  // where you have been and, after going back, where you were: each a view, its model and its search
-  property var past: []
-  property var ahead: []
-  function here() { return { view: ui.view, id: ui.id, key: ui.key, model: ui.model || "", query: ui.query || "" } }
-  function back() { if (!past.length) return; ahead = ahead.concat([here()]); go(past[past.length - 1]); past = past.slice(0, -1) }
-  function forward() { if (!ahead.length) return; past = past.concat([here()]); go(ahead[ahead.length - 1]); ahead = ahead.slice(0, -1) }
-  function go(at) { ui = Object.assign({}, ui, at, { open: "", details: false, problem: "" }); topTick++ }
+  // a new view starts at its top with nothing chosen; within a view, a chosen model stays chosen. A page opened from
+  // one of the tabs remembers which (from), so its way up leads back there
   function nav(patch) {
     var moved = patch.view !== undefined || patch.id !== undefined
-    var to = Object.assign(here(), patch)
-    if (moved && (to.view !== ui.view || to.id !== ui.id || to.model !== (ui.model || ""))) { past = past.concat([here()]).slice(-50); ahead = [] }
-    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", pollProblem: ui.pollProblem || "", notice: ui.notice || "", updatingAgent: ui.updatingAgent || "", query: ui.query || "", model: moved ? "" : ui.model || "", details: moved ? false : !!ui.details, big: !!ui.big, untested: !!ui.untested, sort: ui.sort || "" }, patch)
+    var from = moved && (ui.view === "home" || ui.view === "models") ? ui.view : ui.from || "home"
+    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", pollProblem: ui.pollProblem || "", notice: ui.notice || "", updatingAgent: ui.updatingAgent || "", query: ui.query || "", model: moved ? "" : ui.model || "", details: moved ? false : !!ui.details, big: !!ui.big, untested: !!ui.untested, sort: ui.sort || "", from: from }, patch)
     revealed = false
     if (moved) topTick++
   }
@@ -163,10 +157,7 @@ Panel {
     if (event.key === Qt.Key_Down || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) { step(1); return true }
     if (event.key === Qt.Key_Up || event.key === Qt.Key_Backtab) { step(-1); return true }
     if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && focused) { var a = focused.action; activate(a); return true }
-    if (event.modifiers & Qt.AltModifier && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
-      if (event.key === Qt.Key_Left) back(); else forward()
-      return true
-    }
+    if (event.modifiers & Qt.AltModifier && event.key === Qt.Key_Left) { stepBack(null); return true }
     if (ui.view !== "home" && ui.view !== "models") return false
     var q = ui.query || ""
     if (event.key === Qt.Key_Backspace) q = q.slice(0, -1)
@@ -247,8 +238,6 @@ Panel {
     case "settings": nav({ view: "settings", id: "" }); break
     case "pick": nav({ open: ui.open === a[1] ? "" : a[1] }); break
     case "home": home(); break
-    case "back": back(); break
-    case "forward": forward(); break
     case "full": full = a[1] !== "off"; if (full) root.close(); break
     case "log": Quickshell.execDetached([cli, "log"]); root.close(); full = false; break
     case "url": Quickshell.execDetached(["omarchy-launch-browser", a[1]]); root.close(); full = false; break
@@ -422,12 +411,12 @@ Panel {
     onResetAtChanged: contentY = 0
     // a list that got shorter while scrolled down (a search, a section folded) slides back so its end is on screen
     onContentHeightChanged: if (contentY > Math.max(0, contentHeight - height)) contentY = Math.max(0, contentHeight - height)
-    // a mouse's back and forward buttons step through the views anywhere on the panel
+    // a mouse's back button goes up, as Escape does, anywhere on the panel
     MouseArea {
       width: flick.width
       height: Math.max(flick.height, flick.contentHeight)
-      acceptedButtons: Qt.BackButton | Qt.ForwardButton
-      onClicked: function(e) { root.activate(e.button === Qt.BackButton ? "back" : "forward") }
+      acceptedButtons: Qt.BackButton
+      onClicked: root.stepBack(null)
     }
     contentHeight: content.implicitHeight
     clip: true
@@ -446,54 +435,36 @@ Panel {
       Item {
         width: parent.width
         height: root.headH
-        // back and forward through the views, as in a browser; then where you are
+        // where you are: the panel's name on its tabs; on a page, the way up to where it belongs and the page's name
         Row {
-          id: steps
+          id: crumb
           x: root.gutter
           anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(4)
-          Repeater {
-            model: [{ t: "‹", on: root.past.length > 0, a: "back" }, { t: "›", on: root.ahead.length > 0, a: "forward" }]
-            Label {
-              required property var modelData
-              width: Style.space(14)
-              horizontalAlignment: Text.AlignHCenter
-              text: modelData.t
-              color: modelData.on ? root.ink : Util.alpha(root.labelTone, 0.35)
-              font.pixelSize: Style.font.title
-              Click { action: modelData.on ? modelData.a : "" }
-            }
+          spacing: Style.space(8)
+          Item {
+            visible: !!flick.view.up
+            width: upLabel.implicitWidth
+            height: upLabel.implicitHeight
+            Label { id: upLabel; text: "‹ " + (flick.view.up ? flick.view.up.label : ""); color: root.labelTone }
+            Click { action: flick.view.up ? flick.view.up.action : "" }
+          }
+          Label { visible: !!flick.view.up; text: "/"; color: Util.alpha(root.labelTone, 0.5) }
+          Logo { id: headLogo; family: flick.view.back ? flick.view.whereFamily || "" : ""; size: 13; anchors.verticalCenter: parent.verticalCenter }
+          Label {
+            id: head
+            width: Math.min(implicitWidth, fullToggle.x - crumb.x - (upLabel.visible ? upLabel.width + Style.space(30) : 0) - (headLogo.visible ? headLogo.width + Style.space(8) : 0) - Style.space(16))
+            elide: Text.ElideRight
+            text: flick.view.back ? flick.view.where || "" : flick.view.title
+            color: flick.view.back ? root.ink : root.labelTone
+          }
+          Label {
+            visible: !flick.view.back
+            anchors.baseline: head.baseline
+            text: flick.view.version || ""
+            color: Util.alpha(root.labelTone, 0.55)
+            font.pixelSize: Style.font.caption
           }
         }
-        Logo {
-          id: headLogo
-          anchors.left: steps.right
-          anchors.leftMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          family: flick.view.back ? flick.view.whereFamily || "" : ""
-          size: 13
-        }
-        Label {
-          id: head
-          anchors.left: headLogo.visible ? headLogo.right : steps.right
-          anchors.leftMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          // where you are: the page's name, else the panel's
-          width: Math.min(implicitWidth, fullToggle.x - x - Style.space(16))
-          elide: Text.ElideRight
-          text: flick.view.back ? flick.view.where || "" : flick.view.title
-          color: flick.view.back ? root.ink : root.labelTone
-        }
-        Label {
-          visible: !flick.view.back
-          anchors.left: head.right
-          anchors.leftMargin: Style.space(8)
-          anchors.baseline: head.baseline
-          text: flick.view.version || ""
-          color: Util.alpha(root.labelTone, 0.55)
-          font.pixelSize: Style.font.caption
-        }
-        Click { anchors.fill: head; action: flick.view.back ? "home" : "" }
         Label {
           id: fullToggle
           anchors.right: parent.right
@@ -550,7 +521,7 @@ Panel {
             x: inset
             y: parent.gap
             width: parent.width - 2 * inset
-            sourceComponent: r.type === "sec" && r.items ? secC : ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
+            sourceComponent: r.type === "sec" && (r.items || r.note) ? secC : ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
               field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, mrow: mrowC, tabs: tabsC, banner: bannerC, card: cardC })[r.type] || textC
           }
 
@@ -760,13 +731,15 @@ Panel {
               topPadding: Style.space(2)
               bottomPadding: Style.space(10)
               spacing: Style.space(8)
-              Chips { visible: (r.chips || []).length > 0; x: root.gutter; items: r.chips || [] }
-              Label { visible: !!r.note; x: root.gutter; width: parent.width - 2 * root.gutter; text: r.note || ""; color: root.labelTone; wrapMode: Text.WordWrap }
+              // under an opened model row, its text lines up with the row's name
+              readonly property real indent: r.inset ? root.gutter + Style.space(24) : root.gutter
+              Chips { visible: (r.chips || []).length > 0; x: parent.indent; items: r.chips || [] }
+              Label { visible: !!r.note; x: parent.indent; width: parent.width - parent.indent - root.gutter; text: r.note || ""; color: root.labelTone; wrapMode: Text.WordWrap }
               // the same buttons as a model card's: filled for the main action, outlined for the rest
               Flow {
                 visible: (r.items || []).length > 0
-                x: root.gutter
-                width: parent.width - 2 * root.gutter
+                x: parent.indent
+                width: parent.width - parent.indent - root.gutter
                 spacing: Style.space(8)
                 Repeater {
                   model: r.items || []
@@ -787,8 +760,15 @@ Panel {
             id: secC
             Item {
               height: root.headH
-              Label { x: root.gutter; anchors.verticalCenter: parent.verticalCenter; text: r.label || ""; color: root.labelTone }
               Row {
+                x: root.gutter
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(10)
+                Label { id: secLabel; text: r.label || ""; color: root.labelTone }
+                Label { visible: !!r.note; anchors.baseline: secLabel.baseline; text: r.note || ""; color: Util.alpha(root.labelTone, 0.6); font.pixelSize: Style.font.bodySmall }
+              }
+              Row {
+                visible: (r.items || []).length > 0
                 anchors.right: parent.right
                 anchors.rightMargin: root.gutter
                 anchors.verticalCenter: parent.verticalCenter
@@ -809,41 +789,65 @@ Panel {
             }
           }
 
-          // A model, in two lines: a dot when it runs, its maker's mark, its name and build and what sets it apart,
-          // its speed (or progress) on the right; under them what it is to you. Opens in place (⌄) to manage it.
+          // A model, in two lines on the page's gutter: its maker's mark, its name and build and what sets it apart, its
+          // speed (or progress) on the right; under them what it is to you. Pointed at, its speed gives way to the one
+          // thing it does in a click (Start, Switch, Open); anywhere else on it opens it in place (⌄) with the rest.
           Component {
             id: mrowC
             Item {
               id: mr
-              readonly property real lead: Style.space(32)
+              readonly property real lead: Style.space(24)
               readonly property real tail: Style.space(18)
               readonly property color nameTone: r.dim ? Util.alpha(root.labelTone, 0.8) : root.ink
+              readonly property bool pointed: mrHover.hovered && !!r.act
               height: mrTop.y + mrTop.height + Style.space(3) + mrMeta.implicitHeight + Style.space(9) + (mrBar.visible ? Style.space(3) : 0)
-              Rectangle { visible: !!r.open; x: r.framed ? root.edge + 1 : 0; width: parent.width - (r.framed ? 2 * root.edge + 2 : 0); height: parent.height; color: Util.alpha(root.theme, 0.06) }
+              HoverHandler { id: mrHover }
+              Rectangle {
+                visible: !!r.open || mrHover.hovered
+                x: root.edge
+                width: parent.width - 2 * root.edge
+                height: parent.height
+                radius: 3
+                color: Util.alpha(root.theme, r.open ? 0.07 : 0.04)
+              }
+              Click { action: r.action || "" }
+              // running: a dot in the margin, so the names keep their line
               Label {
                 visible: !!r.live
-                x: root.gutter
+                x: root.gutter - Style.space(11)
                 anchors.verticalCenter: mrTop.verticalCenter
                 text: "●"
                 color: root.ink
                 font.pixelSize: Math.round(Style.font.caption * 0.8)
               }
-              Logo { x: root.gutter + Style.space(12); anchors.verticalCenter: mrTop.verticalCenter; family: r.family || ""; size: 14 }
+              Logo { x: root.gutter; anchors.verticalCenter: mrTop.verticalCenter; family: r.family || ""; size: 14 }
               Item {
                 id: mrTop
                 x: root.gutter + mr.lead
                 y: Style.space(9)
                 width: mr.width - x - root.gutter - mr.tail
-                height: mrTitle.implicitHeight
+                height: Math.max(mrTitle.implicitHeight, mrAct.visible ? mrAct.height : 0)
                 Label {
                   id: mrRight
+                  visible: !mr.pointed
                   anchors.right: parent.right
-                  anchors.baseline: mrTitle.baseline
+                  anchors.verticalCenter: parent.verticalCenter
                   text: r.right || ""
                   color: r.live ? root.ink : r.dim ? root.labelTone : root.valueTone
                 }
+                Btn {
+                  id: mrAct
+                  visible: mr.pointed
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  label: r.act ? r.act.label : ""
+                  action: r.act ? r.act.action : ""
+                  primary: true
+                  small: true
+                }
                 Row {
-                  width: parent.width - mrRight.width - Style.space(12)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - Math.max(mrRight.implicitWidth, mrAct.implicitWidth) - Style.space(12)
                   spacing: Style.space(8)
                   Label {
                     id: mrTitle
@@ -905,7 +909,6 @@ Panel {
                 text: r.drop ? root.glyph(r.open ? "up" : "down") : r.action ? "›" : ""
                 color: r.open ? root.ink : root.labelTone
               }
-              Click { action: r.action || "" }
             }
           }
 
@@ -1360,14 +1363,18 @@ Panel {
     property string action
     property bool primary
     property bool danger
+    // a row's own button, shorter, so the row keeps its height
+    property bool small
     readonly property bool chevron: /\s›$/.test(label)
     // Stop is filled in alert, so it is never mistaken for anything else
     readonly property bool halt: /^stop\|/.test(action)
     readonly property rect glyphs: metrics.tightBoundingRect
     readonly property real weight: chevron ? (glyphs.x + glyphs.width - words.tightBoundingRect.x - words.tightBoundingRect.width) / 6 : 0
     visible: label !== ""
-    implicitWidth: Math.ceil(glyphs.width) + Style.space(24)
-    implicitHeight: btnText.implicitHeight + Style.space(10)
+    implicitWidth: Math.ceil(glyphs.width) + Style.space(small ? 16 : 24)
+    implicitHeight: btnText.implicitHeight + Style.space(small ? 4 : 10)
+    width: implicitWidth
+    height: implicitHeight
     // Stop: no fill, a strong alert border and alert text, never mistaken for anything else
     color: primary ? root.ink : "transparent"
     border.width: primary ? 0 : halt ? 2 : 1
@@ -1381,6 +1388,7 @@ Panel {
       anchors.horizontalCenterOffset: metrics.advanceWidth / 2 - (btn.glyphs.x + btn.glyphs.width / 2) + btn.weight
       text: btn.label
       color: btn.primary ? Qt.rgba(root.bg.r, root.bg.g, root.bg.b, 1) : btn.danger || btn.halt ? root.alertTone : root.ink
+      font.pixelSize: btn.small ? Style.font.bodySmall : Style.font.body
     }
     Click { action: btn.action }
   }

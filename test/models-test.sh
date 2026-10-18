@@ -61,28 +61,34 @@ test('home: tabs, the grid, recommended models, the machine; no search, no Refre
   assert(r.filter(x => x.type === 'mrow').every(x => x.tags.some(t => t.text === 'best pick')));
   assert(!r.some(x => x.type === 'search' || x.type === 'slot' || (x.items || []).some(a => a.action === 'registry')));
 });
-test('home: your models, what runs first, then those pinned to try; each row opens in place; a running card has Open, Switch and Stop', () => {
-  const st = {...s, pins: ['gemma.3090', 'lfm.cpu'], deployments: [{id: 'lfm.cpu', name: 'LFM2.5-2.6B', keys: ['cpu:0'], state: 'ready', agent: 'pi', session: {}}]};
+test('home: what runs as cards, then what is ready to start, then those pinned; each row opens in place; a running card has Open, Switch and Stop', () => {
+  const st = {...s, pins: ['gemma.3090', 'lfm.cpu'], kinds: s.kinds.map(k => k.hw === 'b70' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
+    deployments: [{id: 'lfm.cpu', name: 'LFM2.5-2.6B', keys: ['cpu:0'], state: 'ready', agent: 'pi', session: {}}]};
   const r = home(st);
-  assert.deepEqual(sec(r), ['YOUR MODELS', 'THIS MACHINE']);
-  assert.deepEqual(table(r), ['LFM2.5-2.6B | Q4_K_M | CPU', 'Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
+  // what runs is a card and no row; ready to start is here; pinned downloads when started
+  assert.deepEqual(sec(r), ['READY TO START', 'PINNED', 'THIS MACHINE']);
+  assert.deepEqual(table(r), ['Qwen3.8-27B | Q4_K_M | B70', 'Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
   const rows = r.filter(x => x.type === 'mrow');
-  assert(rows[0].live && rows[0].tags[0].text === 'running');
-  assert(rows.every(x => x.drop && x.action === 'pick|m:' + x.id));
+  assert(rows.every(x => !x.live && x.drop && x.action === 'pick|m:' + x.id));
+  // each row's one-click action: Start where its card is free
+  assert.deepEqual(rows.map(x => x.act && x.act.action), ['run|q27.b70|intel-xpu:0', 'run|gemma.3090|nvidia:0']);
+  // the rest of what fits, a click away
+  assert.deepEqual(r.filter(x => x.action === 'models').map(x => x.label), ['2 more models fit this machine']);
   const card = r.find(x => x.type === 'run');
   assert.deepEqual([card.primary.label, card.primary.action, card.swap, card.more, card.stop], ['Open pi', 'open|lfm.cpu', 'models', 'more|lfm.cpu', 'stop|lfm.cpu']);
 });
-test('models tab: search line, every model that fits sorted by how smart, too big folded', () => {
+test('models tab: search line, what is ready to start, then what downloads first, sorted by how smart; too big folded', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'cpu' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
     downloads: [{id: 'gemma.3090', state: 'download', detail: '3 of 20 GB', percent: 15}]};
   const r = tab(st);
   assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home', 'models*']);
   assert.equal(r[1].hint, 'type to search 6 models');
-  assert.deepEqual(sec(r), ['MODELS FOR THIS MACHINE']);
+  assert.deepEqual(sec(r), ['READY TO START', 'DOWNLOAD FIRST']);
   assert.deepEqual(r.find(x => x.type === 'sec').items.map(x => x.label + (x.on ? '*' : '')), ['smart*', 'fast', 'small']);
+  assert.deepEqual(table(r).slice(0, 2), ['Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090', 'LFM2.5-2.6B | Q4_K_M | CPU']);
   const rows = r.filter(x => x.type === 'mrow');
-  // a download under way: its progress on the right and as a bar; one on disk says so
-  assert.deepEqual([rows[1].title, rows[1].right, rows[1].progress], ['Gemma 4 26B A4B', '↓ 15%', 15]);
+  // a download under way: its progress on the right and as a bar, Cancel in a click; one on disk says so
+  assert.deepEqual([rows[0].title, rows[0].right, rows[0].progress, rows[0].act.label], ['Gemma 4 26B A4B', '↓ 15%', 15, 'Cancel']);
   assert(rows.find(x => x.title === 'LFM2.5-2.6B').meta.includes('14 GB on disk'));
   assert.equal(r.find(x => x.label === 'too big for this machine').value, '1');
   const big = tab(st, {big: true}).find(x => x.type === 'mrow' && x.title === 'Qwen3.8-Flash-Next');
@@ -114,7 +120,7 @@ test('weights on disk an earlier version checked are on disk: Start, Remove down
   assert.equal(opened(r).note, 'on disk; its files are checked when it first starts');
   assert.deepEqual(opened(r).items.map(a => a.label), ['Start ›', 'Remove download', 'Details ›']);
   assert(r.find(x => x.id === 'gemma.3090').meta.includes('7 GB left to download'));
-  assert.deepEqual(sec(home(st)), ['YOUR MODELS', 'THIS MACHINE']);
+  assert.deepEqual(sec(home(st)), ['READY TO START', 'THIS MACHINE']);
 });
 test('the best pick is the smartest that answers at a usable speed; the fastest is marked; sort by smart, fast or small', () => {
   const sp = (d, aa, size) => ({speed: {decode: d, prefill: 300, at: '2026-10-15', source: 'lab'}, aa, sizeGb: size});
