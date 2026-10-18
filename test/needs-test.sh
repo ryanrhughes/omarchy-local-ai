@@ -83,11 +83,11 @@ host 256 500 "$NVME_CRYPT"
 [[ -z $(unfit big) && -z $(unfit big-tp2) && -z $(unfit small) ]] || fail "fit" "$(jq -c .kinds "$TMP/snap.json")"
 pass "a machine with the RAM, the disk and an NVMe drive under LUKS fits the offload recipe"
 if command -v node >/dev/null; then
-  [[ $(view home | jq -r '[.[] | select(.type == "trow") | .cells[0] + "@" + .cells[3]] | join(" ")') == "big@RTX 3090 big-tp2@2× RTX 3090" ]] ||
+  [[ $(view home | jq -r '[.[] | select(.type == "mrow") | .title + "@" + .on] | join(" ")') == "big@RTX 3090 big-tp2@2× RTX 3090" ]] ||
     fail "fit picks" "$(view home)"
   pass "and home recommends it first on a card and across two, as the registry orders them"
   # the models tab lists every model that fits; the offload one's page names the RAM it takes beside its format
-  [[ $(view models | jq -r '[.[] | select(.type == "trow") | .cells[0]] | join(" ")') == "big small big-tp2 small-tp2" ]] || fail "models tab" "$(view models)"
+  [[ $(view models | jq -r '[.[] | select(.type == "mrow") | .title] | join(" ")') == "big small big-tp2 small-tp2" ]] || fail "models tab" "$(view models)"
   [[ $(js 'c.build(s, ui({view: "kind", id: "rtx-3090-24gb", model: "big"})).hero.chips.map(x => x.text).join("|")') == *"96 GB RAM"* ]] || fail "offload page" "$(view kind rtx-3090-24gb)"
   pass "the models tab lists every model that fits, and an offload recipe's page the RAM it takes"
 fi
@@ -97,8 +97,8 @@ host 64 500 "$NVME_CRYPT"
 [[ $(unfit big) == "needs 96 GB RAM, you have 64" && -z $(unfit small) ]] || fail "RAM short" "$(unfit big)"
 pass "too little free RAM: needs 96 GB RAM, you have 64"
 if command -v node >/dev/null; then
-  [[ $(view home | jq -r '[.[] | select(.type == "trow") | .cells[0]] | join(" ")') == "small small-tp2" ]] || fail "unfit skipped" "$(view home)"
-  [[ $(js 'c.build(s, ui({view: "models", big: true})).rows.filter(r => r.type === "trow").map(r => r.cells[0] + (r.dim ? "-" : "")).join(" ")') == "small small-tp2 big- big-tp2-" ]] ||
+  [[ $(view home | jq -r '[.[] | select(.type == "mrow") | .title] | join(" ")') == "small small-tp2" ]] || fail "unfit skipped" "$(view home)"
+  [[ $(js 'c.build(s, ui({view: "models", big: true})).rows.filter(r => r.type === "mrow").map(r => r.title + (r.dim ? "-" : "")).join(" ")') == "small small-tp2 big- big-tp2-" ]] ||
     fail "too big" "$(view models)"
   rows=$(js 'c.build(s, ui({view: "kind", id: "rtx-3090-24gb", model: "big"})).rows')
   jq -e '.[0] == {type: "error", label: "needs 96 GB RAM, you have 64"} and (any(.[]; .type == "acts") | not)' <<<"$rows" >/dev/null || fail "unfit page" "$rows"

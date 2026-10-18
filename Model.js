@@ -74,7 +74,7 @@ function tones(ink, bg, surface, urgent) {
 function mark(s) {
   var d = (s && s.deployments) || []
   if (d.some(function(x) { return x.state === "error" })) return "failed"
-  if (d.some(working)) return "busy"
+  if (d.some(working) || (s && s.downloads || []).some(function(x) { return x.state === "download" })) return "busy"
   return d.some(function(x) { return x.state === "ready" }) ? "ready" : ""
 }
 
@@ -169,6 +169,43 @@ function short(name) {
 }
 // a format short enough for a table cell: EXL3 3 bpw
 function brief(f) { return fmt(f).split(",")[0] }
+// A build's short label, from the registry (quant) or read off its format: FP8, INT4, NVFP4, EXL3 3 bpw, Q4_K_M
+function quantOf(r) {
+  if (r.quant) return r.quant
+  var f = r.format || "", m
+  if ((m = f.match(/EXL3[^,(]*?(\d+(?:\.\d+)?)\s*bpw/i))) return "EXL3 " + m[1] + " bpw"
+  if ((m = f.match(/\b(I?Q\d[_A-Z0-9]*)\b/))) return m[1]
+  if ((m = f.match(/\b(NVFP4|MXFP4|FP8|INT8|INT4|BF16|FP16)\b/i))) return m[1].toUpperCase()
+  return brief(f)
+}
+// A model's own name, without its build: the registry's (Qwen3.8-27B), else its recipe's with the quantizer's tail
+// taken off (gemma-4-26B-A4B-it-AWQ-4bit is gemma-4-26B-A4B)
+function title(r) {
+  if (r.model && r.model.name) return r.model.name
+  return (r.name || "").replace(/[-_ ](it[-_])?(AWQ|GPTQ|NVFP4|MXFP4|FP8|EXL3|GGUF|BF16|INT4|INT8)([-_ ].*)?$/i, "").replace(/-it$/, "") || r.name
+}
+// tok/s, one decimal under 100
+function tps(n) { return n == null ? "" : (n < 100 ? Math.round(n * 10) / 10 : Math.round(n)) + " tok/s" }
+// What a list is sorted by: smart (the Artificial Analysis index, the faster first on a tie), fast (measured decode),
+// small (download size)
+var SORTS = ["smart", "fast", "small"]
+function sorter(by) {
+  var aa = function(c) { return c.aa != null ? c.aa : -1 }, sp = function(c) { return c.speed != null ? c.speed : -1 }
+  return by === "fast" ? function(a, b) { return sp(b) - sp(a) || aa(b) - aa(a) || a.at - b.at }
+    : by === "small" ? function(a, b) { return (a.size || 0) - (b.size || 0) || aa(b) - aa(a) || a.at - b.at }
+    : function(a, b) { return aa(b) - aa(a) || sp(b) - sp(a) || a.at - b.at }
+}
+// The best pick of a card's models: the smartest that fits and answers at a usable speed (20 tok/s, or not measured);
+// when none is that fast, the fastest that fits. Ties go to the faster, then the registry's order.
+var USABLE = 20
+function pickBest(list) {
+  var ok = (list || []).filter(fits), sp = function(r) { return r.speed && r.speed.decode != null ? r.speed.decode : null }
+  var usable = ok.filter(function(r) { return sp(r) == null || sp(r) >= USABLE })
+  var pool = usable.length ? usable : ok
+  return pool.slice().sort(function(a, b) {
+    return usable.length ? ((b.aa || 0) - (a.aa || 0) || (sp(b) || 0) - (sp(a) || 0)) : (sp(b) || 0) - (sp(a) || 0)
+  })[0] || null
+}
 
 // Every model this machine can run, whatever card it lands on: one entry per recipe of each kind of hardware here,
 // on one card or across a group of them (when the machine has that many). Each says where it runs, whether it runs
@@ -179,62 +216,97 @@ function catalog(s) {
   // detail their format carries, e.g. "55 GB RAM" against "experts in RAM"
   ;(s.kinds || []).forEach(function(kd, at) {
     var g = find(s.gpus || [], "key", kd.keys[0]), hw = g ? g.name : kd.hw
-    var rec = {}, first = best(kd.models)
+    var rec = {}, first = pickBest(kd.models)
     if (first) rec[first.id] = 1
+    // the fastest that fits, when it is not the best pick already
+    var quick = kd.models.filter(function(r) { return fits(r) && r.speed && r.speed.decode }).sort(function(a, b) { return b.speed.decode - a.speed.decode })[0]
+    // a card of this kind running one of your models, which Switch stops to start another (never one another program holds)
+    var mine = (s.deployments || []).filter(function(x) { return x.keys.some(function(k) { return kd.keys.indexOf(k) >= 0 && kd.taken.indexOf(k) < 0 }) })[0]
     ;(kd.groups || []).forEach(function(gr) { if (fits(gr) && kd.keys.length >= gr.cards && !rec["n" + gr.cards]) rec["n" + gr.cards] = rec[gr.id] = 1 })
     kd.models.concat(kd.groups || []).forEach(function(r, i) {
       var n = r.cards || 1, short_ = kd.keys.length < n
       var d = (s.deployments || []).filter(function(x) { return x.id === r.id || x.id.indexOf(r.id + "--") === 0 })[0]
       // a setup across more cards than the machine has is listed as too big, saying how many it takes
-      out.push({ id: r.id, name: r.name, family: r.family, format: r.format, engine: r.engine || "", ctx: r.ctx, size: r.sizeGb, needs: r.needs || {}, hw: hw, n: n, d: d || null,
+      var sp = r.speed || {}, onDisk = !!r.downloaded || (r.sizeGb > 0 && r.onDiskGb >= r.sizeGb * 0.98)
+      out.push({ id: r.id, name: r.name, title: title(r), quant: quantOf(r), family: r.family, format: r.format, engine: r.engine || "", ctx: r.ctx, size: r.sizeGb,
+        needs: r.needs || {}, hw: hw, n: n, d: d || null, caps: r.caps || {}, model: r.model || {}, kinds: (s.kinds || []).length,
+        speed: sp.decode != null ? sp.decode : null, prefill: sp.prefill != null ? sp.prefill : null, measured: sp.at || "", source: sp.source || "",
         fits: fits(r) && !short_, unfit: short_ ? "needs " + n + " × " + hw + ", this machine has " + kd.keys.length : r.unfit || "",
-        downloaded: !!r.downloaded, dl: find(s.downloads || [], "id", r.id), reported: !!r.reported, aa: r.aa != null ? r.aa : null,
-        free: kd.free.length >= n, pin: pins.indexOf(r.id), rec: !!rec[r.id], at: at * 1000 + i,
-        on: (n > 1 ? n + "× " : "") + short(hw),
+        downloaded: !!r.downloaded, onDisk: onDisk, part: !onDisk && r.sizeGb > 0 && r.onDiskGb > 0 ? Math.floor(r.onDiskGb / r.sizeGb * 100) : 0,
+        dl: find(s.downloads || [], "id", r.id), reported: !!r.reported, aa: r.aa != null ? r.aa : null,
+        free: kd.free.length >= n, pin: pins.indexOf(r.id), rec: !!rec[r.id], fastest: !!quick && quick === r && !rec[r.id] && kd.models.filter(fits).length > 1,
+        at: at * 1000 + i, on: (n > 1 ? n + "× " : "") + short(hw),
         run: kd.free.length >= n && !short_ ? "run|" + r.id + "|" + kd.free.slice(0, n).join(",") : "",
+        // a card busy with another of your models: stop it and start this one there
+        swap: !d && n === 1 && kd.free.length < n && mine && fits(r) ? "switch|" + mine.id + "|" + r.id + "|" + mine.keys.filter(function(k) { return kd.keys.indexOf(k) >= 0 })[0] : "",
+        swapFrom: mine ? [title(mine), quantOf(mine)].filter(Boolean).join(" ") : "",
         action: d ? "more|" + d.id : short_ ? "" : n > 1 ? "group|" + kd.hw + "|" + n + "|" + r.id : "kind|" + kd.hw + "|" + (kd.free[0] || kd.keys[0]) + "|" + r.id })
     })
   })
+  // two that would read the same (a model, its build, its card) are told apart by the first thing that differs between
+  // them: the detail their format carries (55 GB RAM, experts in RAM), the RAM they take, their context, their engine
+  var ways = [function(c) { return ((c.format || "").match(/\(([^,)]+)/) || [])[1] || "" },
+    function(c) { return c.needs.host_ram_gb ? Math.ceil(c.needs.host_ram_gb) + " GB RAM" : "" },
+    function(c) { return c.ctx ? ctx(c.ctx) + " ctx" : "" }, function(c) { return c.engine }]
   out.forEach(function(c) {
-    var twin = out.some(function(o) { return o !== c && o.name === c.name && o.on === c.on && brief(o.format) === brief(c.format) })
-    var detail = ((c.format || "").match(/\(([^,)]+)/) || [])[1]
-    if (twin) c.variant = detail || (c.needs.host_ram_gb ? Math.ceil(c.needs.host_ram_gb) + " GB RAM" : brief(c.format))
+    var twins = out.filter(function(o) { return o.title === c.title && o.on === c.on && o.quant === c.quant })
+    if (twins.length < 2) return
+    var by = ways.filter(function(f) { return twins.some(function(o) { return f(o) !== f(c) }) })[0]
+    if (by && by(c)) c.variant = by(c)
   })
   return out
 }
 function matches(c, q) {
-  var hay = [c.name, c.family, brief(c.format), c.on, c.hw].join(" ").toLowerCase()
+  var hay = [c.name, c.title, c.quant, c.family, brief(c.format), c.engine, c.on, c.hw].join(" ").toLowerCase()
   return q.split(/\s+/).every(function(w) { return hay.indexOf(w) >= 0 })
 }
-// one model as a table row: a dot when it runs, its name, format and hardware; dim when it cannot start now. Full
-// screen adds its engine, context, download and the RAM and NVMe it needs besides its cards.
-function trow(c, wide) {
-  // the Artificial Analysis index, whole: a rank to compare, not a measurement to read
-  var aa = c.aa != null ? String(Math.round(c.aa)) : "–"
-  var cells = [c.name, aa, c.variant || brief(c.format), c.on]
-  if (wide) cells = [c.name, aa, c.variant || brief(c.format), c.engine || "–", c.on, c.ctx ? ctx(c.ctx) : "–", c.size ? gb(c.size) : "–",
-    c.needs.host_ram_gb ? Math.ceil(c.needs.host_ram_gb) + " GB" : "–", c.needs.fast_storage === "nvme" ? "yes" : "–"]
-  // the mark before the name: running, downloading, downloaded
-  var mark = c.d ? "●" : c.dl && c.dl.state === "download" ? "↓" : ""
-  return { type: "trow", family: c.family || "", live: !!c.d, mark: mark, dim: !c.d && (!c.fits || !c.free), cells: cells, action: c.action }
+// A model as two lines: its maker's mark, its name and build, what is special about it (best pick, fastest), and its
+// measured speed on the right; under them what it is to you: how smart, its context, its size and whether it is
+// here, what it can do. A model that runs says so in place of its speed, one that loads or downloads its progress.
+function mrow(c) {
+  var tags = [], meta = [], right = "", progress = -1, live = !!c.d
+  if (c.d) tags.push({ text: c.d.state === "ready" ? "running" : c.d.state === "error" ? "stopped" : c.d.state === "download" ? "downloading" : "starting", on: true })
+  else if (c.rec && c.fits) tags.push({ text: "best pick", on: true })
+  if (c.fastest && !c.d) tags.push({ text: "fastest" })
+  if (c.reported) tags.push({ text: "reported" })
+  if (c.d && c.d.state !== "ready" && c.d.state !== "error") {
+    right = c.d.percent > 0 ? c.d.percent + "%" : "…"
+    progress = c.d.percent > 0 ? c.d.percent : -1
+  } else if (c.dl && c.dl.state === "download") {
+    right = "↓ " + (c.dl.percent > 0 ? c.dl.percent + "%" : "…")
+    progress = c.dl.percent > 0 ? c.dl.percent : -1
+  } else right = tps(c.speed)
+  if (!c.fits) meta.push(c.unfit)
+  else {
+    if (c.aa != null) meta.push("smart " + Math.round(c.aa))
+    if (c.ctx) meta.push(ctx(c.ctx) + " ctx")
+    if (c.size) meta.push(gb(c.size) + (c.onDisk ? " on disk" : c.part > 0 ? ", " + c.part + "% here" : " download"))
+    if (c.kinds > 1 || c.n > 1) meta.push(c.on)
+    var caps = []
+    if (c.caps.vision) caps.push("vision")
+    if (c.caps.tools) caps.push("tools")
+    if (c.caps.reasoning) caps.push("thinking")
+    meta = meta.concat(caps)
+  }
+  return { type: "mrow", family: c.family || "", title: c.title, quant: c.variant ? c.quant + " · " + c.variant : c.quant, tags: tags, right: right,
+    meta: meta, alert: !c.fits, here: c.onDisk, live: live, progress: progress, on: c.on,
+    // dim: nothing to do with it here now, neither start it nor switch to it
+    dim: !c.d && (!c.fits || (!c.free && !c.swap)), action: c.action, id: c.id }
 }
-// a table of models; on the models tab each row opens in place to manage it. Its rows, an opened row's actions
-// included, sit on one raised surface with a border: the first row draws its top, the last its bottom
-function table(list, wide, ui) {
-  var rows = [{ type: "thead", cells: wide ? ["MODEL", "AA", "FORMAT", "ENGINE", "ON", "CONTEXT", "DOWNLOAD", "RAM", "NVMe"] : ["MODEL", "AA", "FORMAT", "ON"] }]
-  list.forEach(function(c) {
-    var r = trow(c, wide)
-    if (ui) {
-      r.action = "pick|m:" + c.id
-      r.open = ui.open === "m:" + c.id
-      r.drop = true
-    } else r.go = !!r.action
+// a list of models, each opening in place to manage it. Its rows, an opened row's actions included, sit on one
+// raised surface with a border: the first row draws its top, the last its bottom
+function list(cs, ui) {
+  var rows = []
+  cs.forEach(function(c) {
+    var r = mrow(c)
+    r.action = "pick|m:" + c.id
+    r.open = ui.open === "m:" + c.id
+    r.drop = true
     rows.push(r)
     if (r.open) rows.push(manage(c))
   })
   rows.forEach(function(r) { r.framed = true })
-  rows[0].first = true
-  rows[rows.length - 1].last = true
+  if (rows.length) { rows[0].first = true; rows[rows.length - 1].last = true }
   return rows
 }
 // what a model is doing, in one line
@@ -242,34 +314,44 @@ function state(c) {
   if (c.d) return c.d.state === "ready" ? "running on " + c.on : c.d.state === "error" ? "stopped: " + (c.d.error || "the engine stopped") : (c.d.detail || c.d.state)
   if (c.dl) return c.dl.state === "error" ? "download failed: " + (c.dl.error || "try again") : "downloading · " + (c.dl.detail || "") + (c.dl.percent > 0 ? " · " + c.dl.percent + "%" : "")
   if (!c.fits) return c.unfit
-  return (c.downloaded ? "downloaded" : "not downloaded · " + (c.size ? gb(c.size) : "")) + (c.free ? "" : " · its card is in use")
+  var here = c.downloaded ? "downloaded" : c.onDisk ? "on disk; its files are checked when it first starts" : c.part > 0 ? c.part + "% downloaded" : "starts with a " + gb(c.size || 0) + " download"
+  return here + (c.free ? "" : c.swap ? " · Switch stops " + c.swapFrom + " first" : " · its card is in use")
     + (c.reported ? " · reported by its publisher, not yet run by the lab" : "")
 }
-// a model's row opened on the models tab: its state, then Start or Open and Stop, Download, Cancel or Remove, Pin
+// what it is good for, in a sentence: the registry's, else nothing
+function blurb(c) {
+  var m = c.model || {}, t = m.goodFor || m.about || ""
+  var one = (t.match(/^[\s\S]*?\.(?=\s|$)/) || [t])[0]
+  return one.length > 180 ? one.slice(0, 177) + "…" : one
+}
+// a model's row opened: what it is good for and what it is doing, then Start (or Switch to it) or Open and Stop,
+// Download, Cancel or Remove, Pin, Details
 function manage(c) {
   var items = []
   if (c.d && c.d.state === "ready") items.push({ label: "Open ›", action: "open|" + c.d.id, primary: true }, { label: "Stop", action: stop(c.d), danger: true })
   else if (c.d) items.push({ label: "Stop", action: stop(c.d), danger: true })
   else if (c.fits && c.free && c.run) items.push({ label: "Start ›", action: c.run, primary: true })
+  else if (c.swap) items.push({ label: "Switch to this ›", action: c.swap, primary: true })
   if (!c.d) {
     if (c.dl && c.dl.state === "download") items.push({ label: "Cancel download", action: "download|" + c.id + "|off" })
-    else if (c.downloaded) items.push({ label: "Remove download", action: "forget|" + c.id, danger: true })
-    else if (c.fits) items.push({ label: c.dl ? "Download again" : "Download", action: "download|" + c.id })
+    else if (c.downloaded || c.onDisk) items.push({ label: "Remove download", action: "forget|" + c.id, danger: true })
+    else if (c.fits) items.push({ label: c.dl || c.part ? "Resume download" : "Download", action: "download|" + c.id })
   }
   // a model on this machine is on home already; one that is not can be pinned there to try later
-  if (!c.d && !c.dl && !c.downloaded) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
+  if (!c.d && !c.dl && !c.downloaded && !c.onDisk) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
   items.push({ label: "Details ›", action: c.action })
-  return { type: "links", note: state(c), items: items.filter(function(x) { return x.action !== undefined }) }
+  var note = [blurb(c), state(c)].filter(Boolean).join("\n")
+  return { type: "links", note: note, items: items.filter(function(x) { return x.action !== undefined && x.action !== "" }) }
 }
 // home's models: the ones you pinned (running or downloading one pins it), else the recommended ones
 function pinned(s, ui) {
   // your models: what is on this machine (running, downloading, downloaded), then those you pinned to try; until
   // there are any, the recommended ones
-  var all = catalog(s), here = function(c) { return c.d || c.dl || c.downloaded }
-  var mine = all.filter(here).sort(function(a, b) { return (!!b.d - !!a.d) || ((b.aa || 0) - (a.aa || 0)) || a.at - b.at })
+  var all = catalog(s), here = function(c) { return c.d || c.dl || c.downloaded || c.onDisk }
+  var mine = all.filter(here).sort(function(a, b) { return (!!b.d - !!a.d) || sorter(ui.sort)(a, b) })
     .concat(all.filter(function(c) { return !here(c) && c.pin >= 0 }).sort(function(a, b) { return a.pin - b.pin }))
   var top = mine.length ? mine : all.filter(function(c) { return c.rec && c.fits })
-  return [{ type: "sec", label: mine.length ? "YOUR MODELS" : "RECOMMENDED" }].concat(top.length ? table(top, ui.wide)
+  return [{ type: "sec", label: mine.length ? "YOUR MODELS" : "RECOMMENDED" }].concat(top.length ? list(top, ui)
     : [{ type: "links", note: "Nothing fits this machine yet; the models tab says what each one needs.", items: [{ label: "Models ›", action: "models" }] }])
 }
 // What a recipe this version no longer offers left behind (an update withdrew it): each folder with its size and
@@ -288,34 +370,64 @@ function unoffered(s) {
   })
   return rows
 }
-// the models tab: a search line (type anywhere), then the matches, or what you have downloaded, every other model
-// that fits, and those this machine is too small for; each row opens in place to start, download, remove or pin it
+// the models tab: a search line (type anywhere), how to sort, then every model that fits, those this machine is too
+// small for, and those tested only on other cards so far; each row opens in place to start, switch to, download,
+// remove or pin it
 function modelsTab(s, ui) {
-  var all = catalog(s), q = (ui.query || "").trim().toLowerCase(), ok = all.filter(function(c) { return c.fits })
+  var all = catalog(s), q = (ui.query || "").trim().toLowerCase(), by = ui.sort || "smart"
   var rows = [{ type: "search", query: ui.query || "", hint: "type to search " + all.length + (all.length === 1 ? " model" : " models") }]
   if (q) {
-    var hit = all.filter(function(c) { return matches(c, q) }).sort(function(a, b) { return (b.fits - a.fits) || a.at - b.at })
+    var hit = all.filter(function(c) { return matches(c, q) }).sort(function(a, b) { return (b.fits - a.fits) || sorter(by)(a, b) })
     rows.push({ type: "sec", label: "MATCHES" })
-    return rows.concat(hit.length ? table(hit, ui.wide, ui) : [{ type: "links", note: "No model here matches \u201c" + ui.query.trim() + "\u201d. New ones arrive with Local AI updates.", items: [] }])
+    return rows.concat(hit.length ? list(hit, ui) : [{ type: "links", note: "No model here matches “" + ui.query.trim() + "”. New ones arrive with Local AI updates.", items: [] }])
   }
-  // the smartest first, by the Artificial Analysis Intelligence Index; models AA does not list after, in registry order
-  var byAA = function(a, b) { return ((b.aa != null) - (a.aa != null)) || (b.aa || 0) - (a.aa || 0) || a.at - b.at }
-  var have = all.filter(function(c) { return c.d || c.dl || c.downloaded }).sort(byAA), rest = ok.filter(function(c) { return have.indexOf(c) < 0 }).sort(byAA)
-  var big = all.filter(function(c) { return !c.fits && have.indexOf(c) < 0 })
-  if (have.length) rows = rows.concat([{ type: "sec", label: "ON THIS MACHINE" }], table(have, ui.wide, ui))
-  if (rest.length) rows = rows.concat([{ type: "sec", label: have.length ? "MORE THAT FIT" : "FITS THIS MACHINE" }], table(rest, ui.wide, ui))
+  var ok = all.filter(function(c) { return c.fits || c.d }).sort(sorter(by)), big = all.filter(function(c) { return !c.fits && !c.d })
+  var cards = (s.kinds || []).map(function(kd) { var g = find(s.gpus || [], "key", kd.keys[0]); return g ? short(g.name) : kd.hw })
+  rows.push({ type: "sec", label: ok.length ? "MODELS FOR " + (cards.length === 1 ? cards[0] : "THIS MACHINE").toUpperCase() : "NOTHING FITS YET",
+    items: SORTS.map(function(x) { return { label: x, on: x === by, action: x === by ? "" : "sort|" + x } }) })
+  rows = rows.concat(list(ok, ui))
   if (big.length) {
     rows.push({ type: "field", label: "too big for this machine", value: String(big.length), drop: true, open: ui.big, action: "big" })
-    if (ui.big) rows = rows.concat(table(big, ui.wide, ui))
+    if (ui.big) rows = rows.concat(list(big.sort(sorter(by)), ui))
   }
+  rows = rows.concat(untested(s, ui))
   if (s.catalog && s.catalog.commit) rows.push({ type: "banner", text: "models from the registry at " + s.catalog.commit.slice(0, 8) + (s.catalog.at ? " · checked " + ago(Date.parse(s.catalog.at) / 1000) : "") })
   return rows
+}
+// Models tested on other cards and none of these that would fit this machine: folded, never started from here, each
+// saying where it was tested and leading to its page in the registry, where testing it on more cards starts
+var REGISTRY = "https://local.sybilsolutions.ai/models/"
+// a card kind as people say it, when the catalog gives only its id: rtx-pro-4500-blackwell-32gb is RTX PRO 4500 Blackwell
+function cardLabel(id) {
+  if (!/^[a-z0-9-]+$/.test(id)) return id
+  return id.replace(/-\d+gb$/, "").split("-").map(function(w) {
+    return /^(rtx|gtx|rx|pro|dgx|cmp|mi\d+x?|xt|ti|gb\d+|b\d+|m\d+|n\d+x)$/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+  }).join(" ")
+}
+function untested(s, ui) {
+  var u = s.untested || []
+  if (!u.length) return []
+  var rows = [{ type: "field", label: "not yet tested on this card", value: String(u.length), drop: true, open: ui.untested, action: "untested" }]
+  if (!ui.untested) return rows
+  var out = []
+  u.forEach(function(x) {
+    var names = x.cards.map(cardLabel), where = names.slice(0, 2).join(", ") + (names.length > 2 ? " +" + (names.length - 2) : "")
+    var r = { type: "mrow", family: x.family || "", title: x.name, quant: quantOf(x), tags: [], right: x.aa != null ? "smart " + Math.round(x.aa) : "",
+      meta: [gb(x.sizeGb), "tested on " + where], dim: true, drop: true, framed: true, action: "pick|u:" + x.id, open: ui.open === "u:" + x.id }
+    out.push(r)
+    if (r.open) out.push({ type: "links", framed: true, note: "Tested on " + names.join(", ") + ". It has no recipe for this card yet, so Local AI cannot start it here; a recipe arrives once someone runs the tests on one.",
+      items: [/^[a-z0-9][a-z0-9.-]*$/.test(x.id) ? { label: "In the registry ›", action: "url|" + REGISTRY + x.id + "/" } : null,
+        x.hf ? { label: "Hugging Face ›", action: "url|https://huggingface.co/" + x.hf } : null].filter(Boolean) })
+  })
+  out[0].first = true
+  out[out.length - 1].last = true
+  return rows.concat(out)
 }
 
 // Your lifetime as an activity grid: a column a week, a row a weekday, each day shaded in four steps by its tokens
 // against your busiest day (days still to come are blank), the months under their first week, the totals above.
 // Every home screen has it, empty before the first request: at least WEEKS weeks, ending this week.
-var WEEKS = 20
+var WEEKS = 26
 var DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 function activity(s, ui) {
@@ -364,13 +476,15 @@ function card(s, d) {
   var known = cards.every(function(g) { return g.usedMiB != null })
   var used = cards.reduce(function(a, g) { return a + (g.usedMiB || 0) / 1024 }, 0)
   var total = cards.reduce(function(a, g) { return a + (g.vramGb || 0) }, 0)
-  var r = { type: "run", name: d.name, family: d.family, line: all.line || [], more: "more|" + d.id,
+  var r = { type: "run", name: title(d), quant: quantOf(d), family: d.family, line: all.line || [], more: "more|" + d.id,
     gpu: (cards.length > 1 ? cards.length + " × " : "") + (cards[0] ? cards[0].name : "GPU"),
     mem: total && !working(d) ? (known ? Math.round(used) + " / " : "") + total + " GB" : "" }
   if (d.state === "ready") {
     r.chips = [all.decode ? { icon: "speed", text: all.decode + " tok/s" } : null, { icon: "tokens", text: k(all.tokens) }].filter(Boolean)
-    r.primary = { label: "Open " + d.agent, action: "open|" + d.id }
+    r.primary = { label: "Open " + agentName(d.agent), action: "open|" + d.id }
     r.stop = stop(d)
+    // another model in its place: the models tab, where each that fits offers Switch to this
+    r.swap = "models"
   } else {
     r.progress = d.percent > 0 && d.state !== "stopping" ? d.percent : -1
     r.sub = (d.detail || d.state) + (r.progress >= 0 && d.state !== "download" ? " · " + d.percent + "%" : "")
@@ -444,10 +558,11 @@ function soonView(s, ui) {
 // figures when it runs, its cards, what Open uses, its weights, where it answers when it runs, and Run or Log and Stop.
 function page(s, ui, m) {
   var run = m.d, failed = run && run.state === "error", u = run ? run.session || {} : {}, all = u.all || {}, line = all.line || [], top = line.length ? line[line.length - 1] : 0
-  var facts = spec(run ? Object.assign({}, m, { sizeGb: 0 }) : m)
+  var facts = spec(run ? Object.assign({}, m, { sizeGb: 0 }) : m), sp = m.speed || {}
   facts.splice(m.format ? 1 : 0, 0, { icon: "gpu", text: m.cards.length + " × " + (m.cards[0] ? m.cards[0].name : "GPU") })
-  if ((m.caps || {}).vision) facts.push({ icon: "vision", text: "" })
-  var v = { back: true, where: m.name, whereFamily: m.family, rows: [], hero: { name: "", family: "", chips: facts } }
+  if (!run && sp.decode != null) facts.unshift({ icon: "speed", text: tps(sp.decode) })
+  ;["vision", "tools", "reasoning"].forEach(function(c) { if ((m.caps || {})[c]) facts.push({ text: c === "reasoning" ? "thinking" : c }) })
+  var v = { back: true, where: title(m) + "  " + quantOf(m), whereFamily: m.family, rows: [], hero: { name: "", family: "", chips: facts } }
   if (run && !failed) Object.assign(v.hero, { line: line, top: k(top) + " tokens", mid: k(Math.round(top / 2)), since: all.since || "", now: all.last ? ago(all.last) : "now" })
   // one line: what it is doing, or why it cannot start
   var dl = find(s.downloads || [], "id", run ? base(run.id) : m.id), held = (m.cards[0] || {}).status
@@ -457,7 +572,8 @@ function page(s, ui, m) {
     : m.unfit ? m.unfit
     : !m.action ? (held ? "its " + m.cards[0].name + " is " + held : "its cards are in use")
     : dl && dl.state === "download" ? "downloading · " + (dl.detail || "") + (dl.percent > 0 ? " · " + dl.percent + "%" : "")
-    : (m.downloaded ? "downloaded · ready to start" : "starts with a " + gb(m.sizeGb || 0) + " download") + (m.reported ? " · reported, not yet run by the lab" : "")
+    : (m.downloaded ? "downloaded · ready to start" : m.sizeGb > 0 && m.onDiskGb >= m.sizeGb * 0.98 ? "on disk · its files are checked when it first starts"
+      : "starts with a " + gb(m.sizeGb || 0) + " download") + (m.reported ? " · reported, not yet run by the lab" : "")
   v.rows.push(failed || m.unfit ? { type: "error", label: said } : { type: "links", note: said, items: [] })
   // one action, two when it runs: Open and Stop; none for a model this machine cannot run
   if (run && run.offered === false) v.rows.push({ type: "links", note: "no longer offered: once stopped, it cannot start again, and its download is listed on home to remove", items: [] })
@@ -466,6 +582,7 @@ function page(s, ui, m) {
     : run && run.state === "ready" ? [{ label: "Open " + agentName(run.agent) + " ›", action: "open|" + run.id, primary: true }, { label: "Stop", action: stop(run), danger: true }]
     : run ? [{ label: "Stop", action: stop(run), danger: true }]
     : [{ label: "Start ›", action: m.action || "", primary: true }] })
+  about(v.rows, m)
   // full screen has room for its model card, from Hugging Face at the pinned revision
   v.cardFor = run ? base(run.id) : m.id
   if (ui.wide) {
@@ -503,6 +620,20 @@ function page(s, ui, m) {
   }
   v.rows.push({ type: "links", items: [{ label: "View logs", action: "log" }] })
   return v
+}
+
+// What the registry says of a model: what it is, what it is good for, and how fast it ran on this card when tested
+function about(rows, m) {
+  var md = m.model || {}, sp = m.speed || {}, said = []
+  if (md.about) said.push(md.about)
+  if (md.goodFor) said.push("Good for: " + md.goodFor)
+  if (sp.decode != null) said.push("Measured on this card: " + tps(sp.decode) + " writing" + (sp.prefill != null ? ", " + Math.round(sp.prefill) + " tok/s reading" : "")
+    + (sp.at ? ", " + sp.at : "") + ({ lab: ", in the lab", reported: ", reported by its publisher", legacy: ", an earlier run" })[sp.source || "lab"])
+  if (md.released) said.push("Released " + md.released + (m.aa != null ? " · smart " + Math.round(m.aa) + " (Artificial Analysis Intelligence Index)" : ""))
+  else if (m.aa != null) said.push("smart " + Math.round(m.aa) + " (Artificial Analysis Intelligence Index)")
+  if (!said.length) return
+  rows.push({ type: "sec", label: "ABOUT" })
+  rows.push({ type: "links", note: said.join("\n\n"), items: [] })
 }
 
 // A model card as the panel draws it: its markdown without the front matter, styles, HTML or images (nothing is loaded
@@ -673,4 +804,4 @@ function build(s, ui) {
   return Object.assign(v, { mark: ui.problem || ui.pollProblem || s.setupError ? "failed" : mark(s) })
 }
 
-if (typeof module !== "undefined") module.exports = { build: build, parse: parse, tones: tones, catalog: catalog, cardText: cardText }
+if (typeof module !== "undefined") module.exports = { build: build, parse: parse, tones: tones, catalog: catalog, cardText: cardText, quantOf: quantOf, title: title }

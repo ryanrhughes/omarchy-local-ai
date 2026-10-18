@@ -9,15 +9,15 @@ const s = {gpus: [], kinds: [{keys: [], free: [], groups: [], models: []}], depl
   requests: 1, start: 1777852800, since: 'May 4', today: 2, days: [0, 4, 0, 99, 0, 0, 0]
 }};
 const row = context.module.exports.build(s, {view: 'home'}).rows.find(r => r.type === 'life');
-// three days of history, after 19 empty weeks so the grid is always 20 weeks
-assert.equal(row.cells.length, 19 * 7 + 3);
-assert.equal(row.labels.length, 19 * 7 + 3);
+// three days of history, after 25 empty weeks so the grid is always 26 weeks
+assert.equal(row.cells.length, 25 * 7 + 3);
+assert.equal(row.labels.length, 25 * 7 + 3);
 assert.deepEqual(row.cells.slice(-3), [0, 4, 0]);
-assert(/  4 tokens$/.test(row.labels[19 * 7 + 1]));
+assert(/  4 tokens$/.test(row.labels[25 * 7 + 1]));
 console.log('ok - activity ends today and ignores future entries when shading history');
 const empty = context.module.exports.build({...s, total: 0, life: {requests: 0, days: []}}, {view: 'home'}).rows.find(r => r.type === 'life');
 assert.equal(empty.type, 'life');
-assert.equal(Math.ceil(empty.cells.length / 7), 20);
+assert.equal(Math.ceil(empty.cells.length / 7), 26);
 assert(empty.cells.every(c => c === 0));
 assert.equal(empty.since, 'nothing run yet');
 console.log('ok - before any use the grid is there, empty, 20 weeks ending today');

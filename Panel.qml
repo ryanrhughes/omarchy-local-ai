@@ -133,7 +133,7 @@ Panel {
     var moved = patch.view !== undefined || patch.id !== undefined
     var to = Object.assign(here(), patch)
     if (moved && (to.view !== ui.view || to.id !== ui.id || to.model !== (ui.model || ""))) { past = past.concat([here()]).slice(-50); ahead = [] }
-    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", pollProblem: ui.pollProblem || "", notice: ui.notice || "", updatingAgent: ui.updatingAgent || "", query: ui.query || "", model: moved ? "" : ui.model || "", details: moved ? false : !!ui.details, big: !!ui.big }, patch)
+    ui = Object.assign({ view: ui.view, id: ui.id, open: "", key: ui.key, problem: "", pollProblem: ui.pollProblem || "", notice: ui.notice || "", updatingAgent: ui.updatingAgent || "", query: ui.query || "", model: moved ? "" : ui.model || "", details: moved ? false : !!ui.details, big: !!ui.big, untested: !!ui.untested, sort: ui.sort || "" }, patch)
     revealed = false
     if (moved) topTick++
   }
@@ -217,6 +217,8 @@ Panel {
     case "usefolder": run(["set", "folder", decodeURIComponent(a[2])].concat(a[1] ? [a[1]] : [])); nav({ view: a[1] ? "run" : "agents", id: a[1] }); break
     case "run": run(["run", a[1], a[2]]); home(); break
     case "again": run(["stop", a[1]]); run(["run", a[1], a[2]]); home(); break
+    // another model in a running one's place: stop it, then start this one on its card
+    case "switch": run(["stop", a[1]]); run(["run", a[2], a[3]]); home(); break
     case "stop": run(["stop", a[1]]); home(); break
     // the panel stays up until the agent's terminal is launched, so a refusal shows here instead of vanishing
     case "open": run(["open", a[1]]); break
@@ -232,6 +234,8 @@ Panel {
     case "find": nav({ view: "models", id: "", query: a[1] }); break
     case "details": ui = Object.assign({}, ui, { details: !ui.details, open: "" }); break
     case "big": ui = Object.assign({}, ui, { big: !ui.big }); break
+    case "untested": ui = Object.assign({}, ui, { untested: !ui.untested }); break
+    case "sort": ui = Object.assign({}, ui, { sort: a[1], open: "" }); break
     case "model": nav({ model: a[1] }); break
     case "gpus": nav({ view: "gpus", id: "" }); break
     case "agents": nav({ view: "agents", id: "" }); break
@@ -364,8 +368,9 @@ Panel {
     open: root.opened
     focusTarget: keys
     padding: 0
-    // as wide as Omarchy's own panels (380) plus room for the models table; fitted so a small screen still holds it
-    contentWidth: panel.fittedContentWidth(Style.space(400))
+    // wider than Omarchy's own panels (380), as its clock (560) is: a model's name, build and speed on one line, what
+    // it is to you on the next; fitted so a small screen still holds it
+    contentWidth: panel.fittedContentWidth(Style.space(520))
     // never taller than its screen, whether or not the shell says how much room there is: the rest scrolls
     contentHeight: panel.fittedContentHeight(body.contentHeight, panel.screen ? panel.screen.height - Style.space(96) : 0)
 
@@ -469,6 +474,8 @@ Panel {
           anchors.leftMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
           // where you are: the page's name, else the panel's
+          width: Math.min(implicitWidth, fullToggle.x - x - Style.space(16))
+          elide: Text.ElideRight
           text: flick.view.back ? flick.view.where || "" : flick.view.title
           color: flick.view.back ? root.ink : root.labelTone
         }
@@ -538,8 +545,8 @@ Panel {
             x: inset
             y: parent.gap
             width: parent.width - 2 * inset
-            sourceComponent: ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
-              field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, tabs: tabsC, banner: bannerC, card: cardC })[r.type] || textC
+            sourceComponent: r.type === "sec" && r.items ? secC : ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
+              field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, mrow: mrowC, tabs: tabsC, banner: bannerC, card: cardC })[r.type] || textC
           }
 
           // Your lifetime: the totals, then the activity grid (a column a week, a row a weekday) with its months
@@ -621,7 +628,8 @@ Panel {
                   width: parent.width
                   spacing: Style.space(10)
                   Logo { id: cardLogo; family: r.family; size: 18; anchors.verticalCenter: parent.verticalCenter }
-                  Label { width: parent.width - (cardLogo.visible ? cardLogo.width + parent.spacing : 0); elide: Text.ElideRight; text: r.name; color: root.ink; font.pixelSize: Style.font.heading }
+                  Label { id: cardName; width: Math.min(implicitWidth, parent.width - (cardLogo.visible ? cardLogo.width + parent.spacing : 0) - cardQuant.width - parent.spacing); elide: Text.ElideRight; text: r.name; color: root.ink; font.pixelSize: Style.font.heading }
+                  Label { id: cardQuant; anchors.baseline: cardName.baseline; text: r.quant || ""; color: root.labelTone }
                 }
                 // its card and memory on the left; speed and tokens on the right of the same line, clear of the buttons
                 Item {
@@ -671,6 +679,7 @@ Panel {
                   primary: !r.primary.quiet
                   danger: !!r.primary.quiet
                 }
+                Btn { label: r.swap ? "Switch ›" : ""; action: r.swap || "" }
                 Btn { label: root.glyph("more"); action: r.more }
                 // a ready model stops from home too (one starting has Stop as its first button)
                 Btn { label: r.stop ? "Stop" : ""; action: r.stop || ""; danger: true }
@@ -764,6 +773,133 @@ Panel {
                   }
                 }
               }
+            }
+          }
+
+          // A section's name with choices on its right (how a list is sorted): the one chosen in ink, underlined
+          Component {
+            id: secC
+            Item {
+              height: root.headH
+              Label { x: root.gutter; anchors.verticalCenter: parent.verticalCenter; text: r.label || ""; color: root.labelTone }
+              Row {
+                anchors.right: parent.right
+                anchors.rightMargin: root.gutter
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(12)
+                Label { text: "sort"; color: Util.alpha(root.labelTone, 0.6); font.pixelSize: Style.font.bodySmall }
+                Repeater {
+                  model: r.items || []
+                  Item {
+                    required property var modelData
+                    width: optLabel.implicitWidth
+                    height: optLabel.implicitHeight + Style.space(3)
+                    Label { id: optLabel; text: modelData.label; color: modelData.on ? root.ink : root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    Rectangle { visible: modelData.on; anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.ink }
+                    Click { action: modelData.action }
+                  }
+                }
+              }
+            }
+          }
+
+          // A model, in two lines: a dot when it runs, its maker's mark, its name and build and what sets it apart,
+          // its speed (or progress) on the right; under them what it is to you. Opens in place (⌄) to manage it.
+          Component {
+            id: mrowC
+            Item {
+              id: mr
+              readonly property real lead: Style.space(32)
+              readonly property real tail: Style.space(18)
+              readonly property color nameTone: r.dim ? Util.alpha(root.labelTone, 0.8) : root.ink
+              height: mrTop.y + mrTop.height + Style.space(3) + mrMeta.implicitHeight + Style.space(9) + (mrBar.visible ? Style.space(3) : 0)
+              Rectangle { visible: !!r.open; x: r.framed ? root.edge + 1 : 0; width: parent.width - (r.framed ? 2 * root.edge + 2 : 0); height: parent.height; color: Util.alpha(root.theme, 0.06) }
+              Label {
+                visible: !!r.live
+                x: root.gutter
+                anchors.verticalCenter: mrTop.verticalCenter
+                text: "●"
+                color: root.ink
+                font.pixelSize: Math.round(Style.font.caption * 0.8)
+              }
+              Logo { x: root.gutter + Style.space(12); anchors.verticalCenter: mrTop.verticalCenter; family: r.family || ""; size: 14 }
+              Item {
+                id: mrTop
+                x: root.gutter + mr.lead
+                y: Style.space(9)
+                width: mr.width - x - root.gutter - mr.tail
+                height: mrTitle.implicitHeight
+                Label {
+                  id: mrRight
+                  anchors.right: parent.right
+                  anchors.baseline: mrTitle.baseline
+                  text: r.right || ""
+                  color: r.live ? root.ink : r.dim ? root.labelTone : root.valueTone
+                }
+                Row {
+                  width: parent.width - mrRight.width - Style.space(12)
+                  spacing: Style.space(8)
+                  Label {
+                    id: mrTitle
+                    objectName: "local-ai-option-name"
+                    width: Math.min(implicitWidth, parent.width - mrQuant.width - mrTags.width - 2 * parent.spacing)
+                    elide: Text.ElideRight
+                    text: r.title || ""
+                    color: mr.nameTone
+                    font.pixelSize: Style.font.subtitle
+                  }
+                  Label { id: mrQuant; anchors.baseline: mrTitle.baseline; text: r.quant || ""; color: root.labelTone }
+                  Row {
+                    id: mrTags
+                    objectName: "local-ai-option-fit"
+                    anchors.verticalCenter: mrTitle.verticalCenter
+                    spacing: Style.space(4)
+                    Repeater {
+                      model: r.tags || []
+                      Rectangle {
+                        required property var modelData
+                        width: tagText.implicitWidth + Style.space(8)
+                        height: tagText.implicitHeight + Style.space(2)
+                        radius: 2
+                        color: "transparent"
+                        border.width: 1
+                        border.color: modelData.on ? root.ink : root.ruleTone
+                        Label { id: tagText; anchors.centerIn: parent; text: modelData.text; color: modelData.on ? root.ink : root.labelTone; font.pixelSize: Style.font.caption }
+                      }
+                    }
+                  }
+                }
+              }
+              Label {
+                id: mrMeta
+                x: mrTop.x
+                anchors.top: mrTop.bottom
+                anchors.topMargin: Style.space(3)
+                width: mrTop.width
+                elide: Text.ElideRight
+                text: (r.meta || []).join(" · ")
+                color: r.alert ? root.alertTone : root.labelTone
+                font.pixelSize: Style.font.bodySmall
+              }
+              Rectangle {
+                id: mrBar
+                visible: r.progress >= 0
+                x: mrTop.x
+                anchors.top: mrMeta.bottom
+                anchors.topMargin: Style.space(5)
+                width: mrTop.width
+                height: 2
+                color: root.ruleTone
+                Rectangle { width: parent.width * Math.max(0, r.progress || 0) / 100; height: parent.height; color: root.ink }
+              }
+              Label {
+                anchors.right: parent.right
+                anchors.rightMargin: root.gutter
+                anchors.verticalCenter: mrTop.verticalCenter
+                text: r.drop ? root.glyph(r.open ? "up" : "down") : r.action ? "›" : ""
+                color: r.open ? root.ink : root.labelTone
+              }
+              Click { action: r.action || "" }
             }
           }
 

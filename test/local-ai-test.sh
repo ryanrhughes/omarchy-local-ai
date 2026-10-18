@@ -295,13 +295,13 @@ js() {
     const x = eval(process.argv[3]); console.log(typeof x === "string" ? x : JSON.stringify(x))' "$ROOT/Model.js" "$TMP/snap.json" "$1"
 }
 if command -v node >/dev/null; then
-  [[ $(view home) == " tabs,life,sec,thead,trow,sec,field,field,field,field" ]] || fail "home view" "$(view home 2>&1)"
+  [[ $(view home) == " tabs,life,sec,mrow,sec,field,field,field,field" ]] || fail "home view" "$(view home 2>&1)"
   [[ $(view kind rtx-4090-24gb) == " links,acts,field" ]] || fail "kind view" "$(view kind rtx-4090-24gb 2>&1)"
   pass "the view model builds home and the free card's page from the backend's own snapshot"
   # a crashed model whose card no GPU row shows (nvidia-smi failing after a driver update, a card taken out, a card
   # with no kind) is a row of its own with its reason and dismiss; a state the panel does not know yet still shows
   [[ $(js 's.deployments = [{id: "m", name: "M", keys: ["nvidia:9"], state: "error", error: "gone"}]; var v = c.build(s, ui())
-    v.mark + " " + v.rows.map(r => r.type + (r.crashed ? ":" + r.label + ":" + r.dismiss : r.type === "error" ? ":" + r.label : "")).join(",")') == "failed tabs,life,slot:M:stop|m,error:gone,sec,thead,trow,sec,field,field,field,field" &&
+    v.mark + " " + v.rows.map(r => r.type + (r.crashed ? ":" + r.label + ":" + r.dismiss : r.type === "error" ? ":" + r.label : "")).join(",")') == "failed tabs,life,slot:M:stop|m,error:gone,sec,mrow,sec,field,field,field,field" &&
     $(js 's.gpus = []; s.deployments = [{id: "m", name: "M", keys: ["nvidia:0"], state: "error", error: "gone"}];
     c.build(s, ui({open: "lost:m"})).rows.filter(r => r.label || r.items).map(r => r.type + ":" + (r.label || r.items[0].label)).join(",")') == "tabs:home,slot:M,error:gone,links:View logs,sec:RECOMMENDED,sec:THIS MACHINE,field:hardware,field:RAM,field:Agents,field:Settings" &&
     $(js 's.deployments = [{id: "m", name: "M", keys: ["nvidia:1"], state: "error", error: "gone"}]; c.build(s, ui()).rows.filter(r => r.crashed).length') == 1 ]] ||
@@ -313,7 +313,7 @@ if command -v node >/dev/null; then
   [[ $(js '[c.k(999950), c.k(950000), c.k(999), c.gb(0.004), c.gb(13.84)].join(" ")') == "1M 950K 999 <0.1 GB 14 GB" ]] || fail "rounding" "$(js '[c.k(999950), c.gb(0.004)]')"
   # the weeks after daylight saving ends (Sydney, April 5 2026) are an hour longer: June still starts at its first week
   [[ $(TZ=Australia/Sydney js 's.total = 1; s.life = {requests: 1, since: "Feb 3", start: Date.parse("2026-02-02T00:00:00+11:00") / 1000, today: 138,
-    days: Array(140).fill(1)}; c.build(s, ui()).rows.find(r => r.type === "life").months.map(m => m.label + m.col).join(" ")') == "Feb0 Mar4 Apr9 May13 Jun17" ]] || fail "months after a DST end"
+    days: Array(140).fill(1)}; c.build(s, ui()).rows.find(r => r.type === "life").months.map(m => m.label + m.col).join(" ")') == "Jan2 Feb6 Mar10 Apr15 May19 Jun23" ]] || fail "months after a DST end"
   # a model whose recipe is gone and whose config has no start: no empty chip, no NaN; one stopping has no Stop
   [[ $(js 's.deployments = [{id: "gone--2", name: "gone", keys: ["nvidia:0"], state: "ready", port: 1, agent: "pi"}];
     var v = c.build(s, ui({view: "run", id: "gone--2", details: true})); v.hero.chips.map(x => x.text).join(",") + " " + v.rows.find(r => r.type === "grid").cells[5].v') == "1 × RTX 4090 –" ]] ||
@@ -384,7 +384,7 @@ cdi 1
 wait_for ready
 "$CLI" snapshot >"$TMP/snap.json"
 if command -v node >/dev/null; then
-  [[ $(view home) == "ready tabs,life,run,sec,thead,trow,sec,field,field,field,field" && $(view run "$ID") == "ready links,acts,field" ]] ||
+  [[ $(view home) == "ready tabs,life,run,sec,mrow,sec,field,field,field,field" && $(view run "$ID") == "ready links,acts,field" ]] ||
     fail "running views" "$(view home 2>&1; view run "$ID" 2>&1)"
   pass "the view model builds home and the model's page for a running model"
 fi
