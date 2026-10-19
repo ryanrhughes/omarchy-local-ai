@@ -311,6 +311,49 @@ test('a recipe its publisher reported says so, on its row and its page', () => {
   assert.equal(opened(r).note, 'starts with a 14 GB download · reported by its publisher, not yet run by the lab');
   assert.equal(m.build(st, {view: 'kind', id: 'rtx-3090-24gb', key: 'nvidia:0', model: 'gemma.3090'}).rows[0].note, 'starts with a 14 GB download · reported, not yet run by the lab');
 });
+test('storage: each model says which drive it is on, moves between them, downloads to any; one unplugged cannot start', () => {
+  const stores = [{path: '/h/models', name: 'this computer', connected: true, freeGb: 100, usedGb: 40, disk: 'nvme', default: true, primary: true},
+    {path: '/run/media/u/T7/local-ai-models', name: 'T7', connected: true, freeGb: 800, usedGb: 14, disk: 'ssd', default: false, primary: false}];
+  const on = (st, i, connected = true) => ({...s, host: {...s.host, stores: stores.map((x, j) => j === 1 ? {...x, connected} : x)},
+    kinds: s.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, models: k.models.map(x => x.id === 'gemma.3090' ? {...x, downloaded: connected, store: i} : x)} : k)});
+  // on the drive: its row says so, and it moves to this computer
+  const t7 = on(s, 1), row = home(t7).find(x => x.type === 'mrow' && x.title === 'Gemma 4 26B A4B');
+  assert.deepEqual([row.info.disk, row.info.where, row.act.label], ['here', 'T7', 'Start ›']);
+  assert(box(t7, 'gemma.3090').items.some(a => a.label === 'Move to this computer' && a.action === 'move|gemma.3090|%2Fh%2Fmodels'));
+  // on this computer: no where, moves to the drive
+  const mine = home(on(s, 0)).find(x => x.type === 'mrow' && x.title === 'Gemma 4 26B A4B');
+  assert.equal(mine.info.where, '');
+  assert(box(on(s, 0), 'gemma.3090').items.some(a => a.label === 'Move to T7'));
+  // unplugged: still on home, dimmed, saying so, with nothing to start or move
+  const away = on(s, 1, false), a = home(away).find(x => x.type === 'mrow' && x.title === 'Gemma 4 26B A4B');
+  assert.deepEqual([a.info.disk, a.info.where, a.act, a.dim], ['away', 'T7 not connected', null, true]);
+  const ab = box(away, 'gemma.3090');
+  assert(!ab.items.some(x => /^(run|move|download|switch|pin)\|/.test(x.action)), JSON.stringify(ab.items));
+  assert(/on T7, which is not plugged in/.test(ab.note));
+  // a model not here downloads to the default, or to the drive
+  const dl = box(on(s, 0), 'q27.3090').items.map(x => x.label + '=' + x.action);
+  assert(dl.includes('Download to this computer=download|q27.3090') && dl.includes('Download to T7=download|q27.3090|%2Frun%2Fmedia%2Fu%2FT7%2Flocal-ai-models'), dl.join(' '));
+  // one storage: plain Download, no Move
+  assert(box(s, 'q27.3090').items.some(x => x.label === 'Download'));
+});
+test('settings: where models are kept, the default marked, each opening to be made the default or removed; storage on home', () => {
+  const stores = [{path: '/h/models', name: 'this computer', connected: true, freeGb: 100, usedGb: 40, default: true, primary: true},
+    {path: '/run/media/u/T7/local-ai-models', name: 'T7', connected: false, freeGb: 0, usedGb: 0, default: false, primary: false}];
+  const st = {...s, host: {...s.host, stores}};
+  const r = m.build(st, {view: 'settings', open: 'st:1'}).rows;
+  const f = r.filter(x => x.type === 'field').slice(0, 3).map(x => x.label + '=' + x.value);
+  assert.deepEqual(f, ['this computer  · default=40 GB used · 100 GB free', 'T7=not connected', 'Add a drive or folder=']);
+  const box1 = r[r.findIndex(x => x.label === 'T7') + 1];
+  assert.deepEqual(box1.items.map(x => x.label), ['Remove']);
+  assert(/Plug it in/.test(box1.note));
+  assert.equal(r.find(x => x.label === 'Add a drive or folder').action, 'addstore');
+  assert.equal(home(st).find(x => x.label === 'Storage').value, '2 places · 100 GB free on this computer');
+  // choosing a folder for models: the drives plugged in first, then this folder
+  const b = m.build(st, {view: 'folder', key: 'store', browse: {path: '/run/media/u/T7', parent: '/run/media/u', dirs: ['Movies'], drives: [{path: '/run/media/u/T7', name: 'T7', freeGb: 800}]}});
+  assert.deepEqual(b.rows.filter(x => x.type === 'sec').map(x => x.label), ['DRIVES', 'KEEP MODELS HERE?', 'FOLDERS']);
+  assert.equal(b.rows.find(x => x.type === 'links').items[0].action, 'store|add|%2Frun%2Fmedia%2Fu%2FT7');
+  assert.deepEqual(b.up, {label: 'settings', action: 'settings'});
+});
 test('two recipes that would read the same are told apart by what differs between them', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, models: k.models.concat([
     rec('glm.nvme', 'GLM-5.3-Flash', {family: 'glm', format: 'EXL3 · 3.05 bpw (55 GB RAM, experts on NVMe)'}),

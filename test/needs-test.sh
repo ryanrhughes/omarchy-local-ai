@@ -78,8 +78,10 @@ host 256 500 "$NVME_CRYPT"
 "$CLI" set ping off
 "$CLI" snapshot >"$TMP/snap.json"
 # cpus is this machine's own thread count
-[[ $(jq -c '.host | del(.cpus, .cpuName)' "$TMP/snap.json") == '{"ramGb":512,"freeRamGb":256,"diskFreeGb":500,"disk":"nvme","prepared":[]}' ]] &&
-  jq -e '.host.cpus | type == "number" and . > 0' "$TMP/snap.json" >/dev/null || fail "host" "$(jq -c .host "$TMP/snap.json")"
+[[ $(jq -c '.host | del(.cpus, .cpuName, .stores)' "$TMP/snap.json") == '{"ramGb":512,"freeRamGb":256,"diskFreeGb":500,"disk":"nvme","prepared":[]}' ]] &&
+  jq -e '.host.cpus | type == "number" and . > 0' "$TMP/snap.json" >/dev/null &&
+  jq -e '.host.stores | length == 1 and (.[0] | .name == "this computer" and .connected and .default and .primary and .freeGb == 500 and .disk == "nvme")' "$TMP/snap.json" >/dev/null ||
+  fail "host" "$(jq -c .host "$TMP/snap.json")"
 [[ -z $(unfit big) && -z $(unfit big-tp2) && -z $(unfit small) ]] || fail "fit" "$(jq -c .kinds "$TMP/snap.json")"
 pass "a machine with the RAM, the disk and an NVMe drive under LUKS fits the offload recipe"
 if command -v node >/dev/null; then

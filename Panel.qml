@@ -28,7 +28,7 @@ Panel {
   // Nerd Font glyphs for the icon names Model.js uses
   readonly property var glyphs: ({ gpu: 0xf08ae, memory: 0xf035b, temp: 0xf050f, context: 0xf09aa, weights: 0xf01a7, vision: 0xf06d0,
     speed: 0xf140c, tokens: 0xf04a0, agent: 0xf07b7, folder: 0xf0256, machine: 0xf0379, tailnet: 0xf0317, check: 0xf012c, down: 0xf0140, up: 0xf0143, full: 0xf0293, unfull: 0xf0294, more: 0xf01d8, settings: 0xf0493,
-    smart: 0xf09d1, see: 0xf0208, tools: 0xf05b7, reasoning: 0xf0335, disk: 0xf02ca, download: 0xf01da, search: 0xf0349, clear: 0xf0156 })
+    smart: 0xf09d1, see: 0xf0208, tools: 0xf05b7, reasoning: 0xf0335, disk: 0xf02ca, download: 0xf01da, search: 0xf0349, clear: 0xf0156, usb: 0xf0553, plus: 0xf0415 })
   function glyph(name) { return glyphs[name] ? String.fromCodePoint(glyphs[name]) : "" }
 
   // Four tones, each picked by the APCA contrast it must reach on a card (Model.tones): ink for what matters
@@ -237,7 +237,11 @@ Panel {
     case "kind": nav({ view: "kind", id: a[1], key: a[2] || "", model: a[3] || "" }); break
     case "group": nav({ view: "group", id: a[1], key: a[2], model: a[3] || "" }); break
     case "pin": run(["pin", a[1]].concat(a[2] ? [a[2]] : [])); break
-    case "download": run(["download", a[1]].concat(a[2] ? [a[2]] : [])); break
+    case "download": run(["download", a[1]].concat(a[2] ? [decodeURIComponent(a[2])] : [])); break
+    // storage: a model's files to another, one added, made the default or removed
+    case "move": run(["move", a[1], decodeURIComponent(a[2])]); nav({ open: "" }); break
+    case "store": run(["store", a[1], decodeURIComponent(a[2])]); if (a[1] === "add") nav({ view: "settings", id: "", key: "" }); else nav({ open: "" }); break
+    case "addstore": nav({ view: "folder", id: "", key: "store" }); ui = Object.assign({}, ui, { browse: null }); run(["dirs", ""]); break
     case "models": nav({ view: "models", id: "" }); break
     // the models tab, searched for a card
     case "find": nav({ view: "models", id: "", query: a[1] }); break
@@ -957,9 +961,12 @@ Panel {
                   Row {
                     visible: !!r.info && !!r.info.size
                     spacing: Style.space(4)
-                    Label { text: root.glyph(r.info && r.info.disk === "download" ? "download" : "disk"); color: r.info && r.info.disk !== "download" ? root.valueTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
-                    Label { text: r.info ? r.info.size : ""; color: r.info && r.info.disk !== "download" ? root.valueTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    readonly property bool there: !!r.info && r.info.disk !== "download" && r.info.disk !== "away"
+                    Label { text: root.glyph(r.info && r.info.disk === "download" ? "download" : r.info && r.info.where && r.info.disk !== "away" ? "usb" : "disk"); color: parent.there ? root.valueTone : r.info && r.info.disk === "away" ? root.alertTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    Label { text: r.info ? r.info.size : ""; color: parent.there ? root.valueTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
                     Label { visible: !!r.info && !!r.info.rest; text: "+ " + root.glyph("download") + " " + (r.info ? r.info.rest : ""); color: root.labelTone; font.pixelSize: Style.font.bodySmall }
+                    // the storage it is on, when there is more than one
+                    Label { visible: !!r.info && !!r.info.where && r.info.disk !== "download"; text: r.info ? "on " + r.info.where : ""; color: r.info && r.info.disk === "away" ? root.alertTone : root.labelTone; font.pixelSize: Style.font.bodySmall }
                   }
                   Label { visible: !!r.info && !!r.info.on; text: r.info ? r.info.on : ""; color: root.labelTone; font.pixelSize: Style.font.bodySmall }
                 }

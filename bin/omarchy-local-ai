@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Run the model validated for your GPU and open a coding agent on it
-# omarchy:args=setup | registry | forget <recipe> | snapshot | readiness | run <recipe> <gpu>[,<gpu>...] | stop <recipe> | open <recipe> | update <agent>|plugin | set agent|folder <value> [recipe] | set ping on|off | dirs <folder> | share <recipe> [off] | pin <recipe> [off] | download <recipe> [off] | card <recipe> | outdated | cdi | log | remove
+# omarchy:args=setup | registry | forget <recipe> | snapshot | readiness | run <recipe> <gpu>[,<gpu>...] | stop <recipe> | open <recipe> | update <agent>|plugin | set agent|folder <value> [recipe] | set ping on|off | dirs <folder> | share <recipe> [off] | pin <recipe> [off] | download <recipe> [off|<storage>] | move <recipe> <storage> | store add|default|remove <folder> | card <recipe> | outdated | cdi | log | remove
 # omarchy:hidden=true
 
 # The backend of the Local AI bar widget. One running model is one folder, $STATE/deploy/<recipe>:
@@ -30,6 +30,8 @@ RECIPES=$PANEL/recipes.json
 # a refreshed catalog wins until the plugin is updated: an update brings recipes newer than any earlier refresh
 [[ ! $CATALOG -nt $RECIPES ]] || RECIPES=$CATALOG
 LABEL=io.omarchy.local-ai
+# the storages, read when first needed (load_stores)
+STORES=()
 SYS=${LOCAL_AI_SYSFS:-/sys}
 AGENTS=(pi claude codex opencode omp crush grok copilot hermes)
 umask 077
@@ -46,7 +48,67 @@ paths() {
   KEY=$STATE/gateway.key
   AUTH=$STATE/gateway.auth
   LOG=$STATE/log
+  STORES=()
 }
+
+# Storage: where model files live. This computer's models folder always is one; more can be added (`store add`: a
+# local-ai-models folder on another drive or anywhere else), each named for its drive. A model's files are in the first
+# storage that has them, in this order, else in the one they were put in (placed.json) when that drive is not plugged
+# in; a download goes to the default storage (`store default`) unless told where ($TO). A storage whose folder is not
+# there is not connected: nothing starts from it or downloads to it, and no folder is made in its place.
+load_stores() {
+  local p n
+  STORES=("$MODELS")
+  declare -gA STORE_NAMES=(["$MODELS"]="this computer")
+  while IFS=$'\t' read -r p n; do
+    [[ $p == /* && $p != *..* ]] || continue
+    printf '%s\n' "${STORES[@]}" | grep -qxF -- "$p" && continue
+    STORES+=("$p")
+    STORE_NAMES[$p]=${n:-${p##*/}}
+  done < <(jq -r '.stores // [] | .[] | objects | [.path, .name // ""] | @tsv' "$STATE/settings.json" 2>/dev/null)
+  STORE=$(jq -r '.store // empty' "$STATE/settings.json" 2>/dev/null) || STORE=""
+  is_store "$STORE" || STORE=$MODELS
+  [[ -z ${TO:-} ]] || is_store "$TO" || TO=""
+}
+is_store() { [[ -n $1 ]] && printf '%s\n' "${STORES[@]}" | grep -qxF -- "$1"; }
+store_name() { ((${#STORES[@]})) || load_stores; printf '%s' "${STORE_NAMES[$1]:-${1##*/}}"; }
+# store_root <path>: the storage a path is in, "" when it is in none
+store_root() {
+  local s
+  ((${#STORES[@]})) || load_stores
+  for s in "${STORES[@]}"; do [[ $1 != "$s/"* ]] || { printf '%s' "$s"; return; }; done
+}
+# store_of <folder>: the storage holding <folder> (repo@rev, hf/hub/models--repo/snapshots/rev or prepared/<hash>)
+store_of() {
+  local s
+  ((${#STORES[@]})) || load_stores
+  for s in "${STORES[@]}"; do [[ ! -e $s/$1 ]] || { printf '%s' "$s"; return; }; done
+  s=$(jq -r --arg n "${1%%/*}" '.[$n] // empty' "$STATE/placed.json" 2>/dev/null) || s=""
+  [[ $1 != hf/* ]] || s=$(jq -r --arg n "$(unit_of "$1")" '.[$n] // empty' "$STATE/placed.json" 2>/dev/null) || s=""
+  if is_store "$s" && [[ ! -d $s ]]; then printf '%s' "$s"; else printf '%s' "${TO:-$STORE}"; fi
+}
+# unit_of <folder>: what moves as one: a weights folder, a Hub cache repository with its refs, a prepared pack
+unit_of() {
+  local IFS=/ x
+  read -ra x <<<"$1"
+  case ${x[0]} in
+  hf) printf 'hf/hub/%s' "${x[2]}" ;;
+  prepared) printf 'prepared/%s' "${x[1]}" ;;
+  *) printf '%s' "${x[0]}" ;;
+  esac
+}
+# placed <unit> <storage>: where a unit was put, so a drive not plugged in still says which models are on it
+placed() {
+  local f=$STATE/placed.json
+  (
+    exec 8>"$f.lock"
+    flock -w 10 8 || exit 0
+    { cat "$f" 2>/dev/null || echo '{}'; } | jq --arg n "$1" --arg s "$2" 'if type == "object" then . else {} end | if $s == "" then del(.[$n]) else .[$n] = $s end' >"$f.$$"
+    mv -f "$f.$$" "$f"
+  )
+}
+# connected <storage> or die saying which drive to plug in; this computer's is made when first needed
+connected() { [[ $1 == "$MODELS" || -d $1 ]] || die "$(store_name "$1") is not connected; plug it in and try again"; }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 say() { printf '%s %s\n' "$(now)" "$*" >>"$LOG"; }
@@ -442,23 +504,55 @@ gpus() {
 # Sizes are GB of 1e9 bytes, as the registry states them. Weights folders already downloaded and checked are listed,
 # and every weights folder's bytes so far (a download resumes, and files linked in from another copy take no space).
 host() {
-  local d=$MODELS ram=0 free=0 src="" avail=0 disk="" prepared have=() got=()
-  while [[ ! -d $d && $d == /*/* ]]; do d=${d%/*}; done
+  local s d n i=0 ram=0 free=0 src avail disk prepared='[]' p have=() got=() at=() info=()
+  local -A seen=()
+  ((${#STORES[@]})) || load_stores
   read -r ram free < <(awk '/^MemTotal:/{t = $2} /^MemAvailable:/{a = $2} END{print t + 0, a + 0}' "${MEMINFO:-/proc/meminfo}" 2>/dev/null) || true
-  read -r src avail < <(df -B1 --output=source,avail -- "$d" 2>/dev/null | tail -1) || true
-  # every drive under the filesystem: nvme when each is a non-rotational NVMe drive, else what the first one is
-  [[ $src == /dev/* ]] && disk=$(lsblk -snro TYPE,ROTA,TRAN -- "$src" 2>/dev/null | awk '$1 == "disk" {n++; if ($2 == "0" && $3 == "nvme") v++
-    else if (k == "") k = ($2 == "0" ? "ssd" : "hdd")} END {print n && v == n ? "nvme" : k}')
-  for d in "$MODELS"/*/.verified2 "$MODELS"/*/*/.verified2; do have+=("${d#"$MODELS"/}"); done
-  for d in "$MODELS"/*/ "$MODELS"/*/*/; do got+=("${d#"$MODELS"/}" "$(du -sb -- "$d" 2>/dev/null | cut -f1)"); done
-  prepared=$(jq -s 'map(select(type == "object"))' "$MODELS"/prepared/*/.complete.json 2>/dev/null) || prepared='[]'
-  jq -nc --argjson r "${ram:-0}" --argjson f "${free:-0}" --argjson a "${avail:-0}" --arg d "$disk" --argjson prepared "$prepared" \
+  for s in "${STORES[@]}"; do
+    src="" avail=0 disk="" d=$s
+    # this computer's folder may not be made yet: its free space is its parent's
+    if [[ $s == "$MODELS" ]]; then while [[ ! -d $d && $d == /*/* ]]; do d=${d%/*}; done; fi
+    if [[ -d $d ]]; then
+      read -r src avail < <(df -B1 --output=source,avail -- "$d" 2>/dev/null | tail -1) || true
+      # every drive under the filesystem: nvme when each is a non-rotational NVMe drive, else what the first one is
+      [[ $src == /dev/* ]] && disk=$(lsblk -snro TYPE,ROTA,TRAN -- "$src" 2>/dev/null | awk '$1 == "disk" {n++; if ($2 == "0" && $3 == "nvme") v++
+        else if (k == "") k = ($2 == "0" ? "ssd" : "hdd")} END {print n && v == n ? "nvme" : k}')
+    fi
+    info+=("$s" "$(store_name "$s")" "$([[ -d $s || $s == "$MODELS" ]] && echo 1 || echo 0)" "${avail:-0}" "$disk")
+    if [[ -d $s ]]; then
+      # the first storage with a folder has it
+      for p in "$s"/*/.verified2 "$s"/*/*/.verified2; do n=${p#"$s"/}; n=${n%/.verified2}; [[ -n ${seen[$n]:-} ]] || have+=("$n/.verified2"); done
+      for p in "$s"/*/ "$s"/*/*/; do
+        n=${p#"$s"/}; n=${n%/}
+        [[ -z ${seen[$n]:-} ]] || continue
+        seen[$n]=$i
+        got+=("$n" "$(du -sb -- "$p" 2>/dev/null | cut -f1)")
+        at+=("$n" "$i")
+      done
+      p=$(jq -s 'map(select(type == "object"))' "$s"/prepared/*/.complete.json 2>/dev/null) || p='[]'
+      prepared=$(jq -c --argjson a "$prepared" --argjson b "$p" -n '$a + $b')
+    fi
+    i=$((i + 1))
+  done
+  jq -nc --argjson r "${ram:-0}" --argjson f "${free:-0}" --argjson prepared "$prepared" \
     --argjson fit "$(jq -c 'if type == "object" then . else {} end' "$STATE/fit.json" 2>/dev/null || echo '{}')" \
+    --argjson placed "$(jq -c 'if type == "object" then . else {} end' "$STATE/placed.json" 2>/dev/null || echo '{}')" \
+    --arg default "${STORE:-$MODELS}" --argjson nstores "${#STORES[@]}" --argjson ninfo "${#info[@]}" --argjson nhave "${#have[@]}" --argjson ngot "${#got[@]}" \
     --argjson cpus "$(nproc 2>/dev/null || echo 0)" --arg cpuName "$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)" \
-    'def gb: . * 10 | floor / 10; {ramGb: ($r * 1024 / 1e9 | gb), freeRamGb: ($f * 1024 / 1e9 | gb), diskFreeGb: ($a / 1e9 | gb), disk: $d, cpus: $cpus, cpuName: $cpuName,
-      prepared: $prepared, fit: $fit, have: [$ARGS.positional[] | select(endswith("/.verified2"))],
-      got: ([$ARGS.positional[] | select(endswith("/.verified2") | not)] | [range(0; length; 2) as $i | {(.[$i] | rtrimstr("/")): (.[$i + 1] | tonumber? // 0)}] | add // {})}' \
-    --args ${have[@]+"${have[@]}"} ${got[@]+"${got[@]}"}
+    'def gb: . * 10 | floor / 10; $ARGS.positional as $a
+    | [range(0; $ninfo; 5) as $i | {path: $a[$i], name: $a[$i + 1], connected: ($a[$i + 2] == "1"), freeGb: ($a[$i + 3] | tonumber? // 0 | . / 1e9 | gb), disk: $a[$i + 4]}] as $stores
+    | $a[$ninfo:$ninfo + $nhave] as $have
+    | $a[$ninfo + $nhave:$ninfo + $nhave + $ngot] | [range(0; length; 2) as $i | {(.[$i]): (.[$i + 1] | tonumber? // 0)}] | (add // {}) as $got
+    | $a[$ninfo + $nhave + $ngot:] | [range(0; length; 2) as $i | {(.[$i]): (.[$i + 1] | tonumber)}] | (add // {}) as $found
+    # what was put on a drive not plugged in now, and is not found on one that is
+    | ($placed | to_entries | map(.value as $p | ($stores | map(.path) | index($p)) as $j
+        | select($j != null and ($stores[$j].connected | not)) | {(.key): $j}) | add // {}) as $away
+    | ($stores | map(.path) | index($default) // 0) as $d
+    | {ramGb: ($r * 1024 / 1e9 | gb), freeRamGb: ($f * 1024 / 1e9 | gb), diskFreeGb: $stores[$d].freeGb, disk: $stores[$d].disk, cpus: $cpus, cpuName: $cpuName,
+      prepared: $prepared, fit: $fit, have: $have, got: $got, at: ($away + $found),
+      stores: [$stores | to_entries[] | .key as $i | .value + {default: ($i == $d), primary: ($i == 0),
+        usedGb: ([$got | to_entries[] | select(($found[.key] == $i) and (.key | test("^[^/]+$|^prepared/[^/]+$"))) | .value] | add // 0 | . / 1e9 | gb)}]}' \
+    --args ${info[@]+"${info[@]}"} ${have[@]+"${have[@]}"} ${got[@]+"${got[@]}"} ${at[@]+"${at[@]}"}
 }
 
 # unfit($host): why this machine cannot run the recipe, "" when it can. A recipe's `needs` (the registry's contract):
@@ -475,13 +569,16 @@ NEEDS="$PREP_CONTRACT"'def unfit($h): (.needs // {}) as $n | prepared_contract a
       else [0, ($n.disk_gb // 0) - $got - $pack] | max end) + $missingPack) as $missingDisk
   | [if ($n.host_ram_gb // 0) > $h.freeRamGb then "needs \($n.host_ram_gb | gb) GB RAM, you have \($h.freeRamGb | floor)" else empty end,
      if $missingDisk > $h.diskFreeGb then "needs \($missingDisk | gb) GB free disk, you have \($h.diskFreeGb | floor)" else empty end,
-     if ($n.fast_storage // "") == "nvme" and $h.disk != "nvme" then "needs the models folder on an NVMe drive" else empty end,
+     if ($n.fast_storage // "") == "nvme" and ((first($w[] | ($h.at // {})[.] // empty) // null) as $s
+       | if $s != null then $h.stores[$s].disk else $h.disk end) != "nvme" then "needs the models folder on an NVMe drive" else empty end,
      if ($n.cpus // 0) > ($h.cpus // 0) then "needs \($n.cpus) CPU threads, you have \($h.cpus // 0)" else empty end]
   | join("; ");'
 
 # wpaths <weights-item>: repository|revision|files|layout|mountPath|the folder the engine mounts|where the files are in it
 wpaths() {
-  jq -r --arg m "$MODELS" '(.repository | gsub("/"; "--")) as $r
+  local n
+  n=$(jq -r '(.repository | gsub("/"; "--")) as $r | if .layout == "hub" then "hf/hub/models--\($r)/snapshots/\(.revision)" else "\($r)@\(.revision[:12])" end' <<<"$1")
+  jq -r --arg m "$(store_of "$n")" '(.repository | gsub("/"; "--")) as $r
     | (if .layout == "hub" then "\($m)/hf" else "\($m)/\($r)@\(.revision[:12])" end) as $mount
     | [.repository, .revision, .files // "", .layout, .mountPath, $mount, if .layout == "hub"
         then "\($mount)/hub/models--\($r)/snapshots/\(.revision)" else $mount + (if .dir then "/" + .dir else "" end) end]
@@ -529,9 +626,11 @@ good() {
 # .verified2 marks a folder checked against every file's hash; an earlier version's .verified checked small files by
 # size only, so such a folder is checked again once (a file that matches stays, nothing is downloaded twice).
 fetch() {
-  local id=$1 repo rev files layout m d lock rows total done=0 path sz sha src pid have
+  local id=$1 repo rev files layout m d lock rows total done=0 path sz sha src pid have root
   IFS='|' read -r repo rev files layout _ m d < <(wpaths "$2")
   [[ ! -f $d/.verified2 ]] || return 0
+  root=$(store_root "$d")
+  connected "$root"
   # one download per weights folder: a second model on the same weights (the same model on another card) waits for
   # the first, then finds them checked; two curls appending to one .part corrupt it. The lock is the whole folder's,
   # <repo>@<rev>.lock beside it, whatever `dir` inside it a recipe uses: the one forget_folder checks (hub-layout
@@ -546,6 +645,8 @@ fetch() {
     sleep 2
   done
   [[ ! -f $d/.verified2 ]] || { exec 7>&-; return 0; }
+  # moved to another storage while this waited: fetch it there
+  if [[ $(wpaths "$2" | cut -d'|' -f7) != "$d" ]]; then exec 7>&-; fetch "$@"; return; fi
   rows=$(tree "$repo" "$rev" "$files") || die "Hugging Face did not list $repo (rate limit or no network): try again in a minute"
   [[ -n $rows ]] || die "Hugging Face listed no model files; refresh models and try again"
   total=$(awk -F'\t' '{s += $2} END {print s + 0}' <<<"$rows")
@@ -587,6 +688,7 @@ fetch() {
     (umask 022 && mkdir -p "$d/../../refs" && echo -n "$rev" >"$d/../../refs/main")
   fi
   (umask 022 && : >"$d/.verified2")
+  placed "$(unit_of "${d#"$root"/}")" "$([[ $root == "$MODELS" ]] || printf '%s' "$root")"
   exec 7>&-
 }
 
@@ -669,7 +771,11 @@ fit() {
   ) 2>/dev/null || true
 }
 prepared_contract() { jq -cS "$PREP_CONTRACT prepared_contract" <<<"$1"; }
-prepared_path() { printf '%s/prepared/%s' "$MODELS" "$(prepared_contract "$1" | sha256sum | cut -c1-64)"; }
+prepared_path() {
+  local n
+  n=prepared/$(prepared_contract "$1" | sha256sum | cut -c1-64)
+  printf '%s/%s' "$(store_of "$n")" "$n"
+}
 managed_paths() {
   local w d
   while IFS= read -r w; do IFS='|' read -r _ _ _ _ _ _ d < <(wpaths "$w"); printf '%s\n' "$d"; done < <(jq -c '.weights[]?' <<<"$1")
@@ -694,6 +800,7 @@ prepare_model() (
   [[ $(jq -r '.prepare // empty' <<<"$r") ]] || return 0
   pack=$(prepared_path "$r")
   at=$(jq -r .prepare.at <<<"$r")
+  connected "$(store_root "$pack")"
   mkdir -p "${pack%/*}"
   owned "${pack%/*}"
   exec 6>"$pack.lock"
@@ -1345,8 +1452,9 @@ cmd_forget() {
     ((${#paths[@]} > 0)) || die "$1 recorded no download to remove"
   fi
   for d in "${!paths[@]}"; do
-    [[ ${paths[d]} == "$MODELS/"* && ${paths[d]} != *"/../"* && ${paths[d]} != *"/.."  ]] || die "invalid download path"
+    [[ -n $(store_root "${paths[d]}") && ${paths[d]} != *"/../"* && ${paths[d]} != *"/.."  ]] || die "invalid download path"
     paths[d]=${paths[d]%/}
+    [[ -e ${paths[d]} ]] || connected "$(store_root "${paths[d]}")"
   done
   for other in "$STATE"/deploy/*/config.json; do
     [[ $other != "$self" ]] || continue
@@ -1357,7 +1465,8 @@ cmd_forget() {
           die "stop existing models with incomplete download records before removing downloads"
       fi
       while IFS= read -r d; do busy+=("$d"); done < <(managed_paths "$live")
-    elif jq -e --arg root "$MODELS/" '.managedPaths | type == "array" and length > 0 and all(.[]; type == "string" and startswith($root))' "$other" >/dev/null; then
+    elif jq -e '.managedPaths | type == "array" and length > 0 and all(.[]; type == "string")' "$other" >/dev/null &&
+      ! jq -r '.managedPaths[]' "$other" | while IFS= read -r d; do [[ -n $(store_root "$d") ]] || echo out; done | grep -q .; then
       while IFS= read -r d; do busy+=("$d"); done < <(jq -r '.managedPaths[]' "$other")
     else
       die "stop existing models before removing downloads"
@@ -1371,7 +1480,7 @@ cmd_forget() {
       owned "$target"
     fi
   done
-  for target in "${paths[@]}"; do rm -rf -- "$target"; done
+  for target in "${paths[@]}"; do rm -rf -- "$target"; placed "$(unit_of "${target#"$(store_root "$target")"/}")" ""; done
   say "$1 download removed"
 }
 
@@ -1392,23 +1501,28 @@ deployed_paths() {
 }
 
 unoffered() {
-  local d n r used deployed
+  local d n r s used deployed
   # nothing is listed while a running model's weights cannot be told apart from leftovers
   deployed=$(deployed_paths) || { echo '[]'; return; }
+  ((${#STORES[@]})) || load_stores
   used=$({
     jq -r '.hardware[].recipes[].weights[]? | select(.layout != "hub") | "\(.repository | gsub("/"; "--"))@\(.revision[:12])"' "$RECIPES"
-    jq -c '.hardware[].recipes[] | select(.prepare != null)' "$RECIPES" | while IFS= read -r r; do d=$(prepared_path "$r"); echo "${d#"$MODELS"/}"; done
-    printf '%s\n' "$deployed" | jq -Rr --arg m "$MODELS/" 'select(startswith($m))
-      | ltrimstr($m) | split("/") | if .[0] == "prepared" then .[0:2] | join("/") else .[0] end'
+    jq -c '.hardware[].recipes[] | select(.prepare != null)' "$RECIPES" | while IFS= read -r r; do d=$(prepared_path "$r"); echo "${d#"$(store_root "$d")"/}"; done
+    printf '%s\n' "$deployed" | while IFS= read -r d; do s=$(store_root "$d"); [[ -z $s ]] || printf '%s\n' "${d#"$s"/}"; done |
+      jq -Rr 'split("/") | if .[0] == "prepared" then .[0:2] | join("/") else .[0] end'
   } | sort -u)
-  for d in "$MODELS"/*@*/ "$MODELS"/prepared/*/; do
-    n=${d%/}
-    n=${n#"$MODELS"/}
-    # a name with a tab or a newline is not one this plugin makes, and would break the list: it is left alone
-    [[ $n != *[$'\t\n']* ]] || continue
-    ! grep -qxF -- "$n" <<<"$used" || continue
-    printf '%s\t%s\n' "$n" "$(du -sb -- "$d" 2>/dev/null | cut -f1)"
-  done | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | {folder: .[0], gb: ((.[1] | tonumber? // 0) / 1e8 | floor / 10)})'
+  for s in "${STORES[@]}"; do
+    for d in "$s"/*@*/ "$s"/prepared/*/; do
+      n=${d%/}
+      n=${n#"$s"/}
+      # a folder also in a storage before this one is that one's
+      [[ $(store_of "$n") == "$s" ]] || continue
+      # a name with a tab or a newline is not one this plugin makes, and would break the list: it is left alone
+      [[ $n != *[$'\t\n']* ]] || continue
+      ! grep -qxF -- "$n" <<<"$used" || continue
+      printf '%s\t%s\t%s\n' "$n" "$(du -sb -- "$d" 2>/dev/null | cut -f1)" "$(store_name "$s")"
+    done
+  done | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | {folder: .[0], gb: ((.[1] | tonumber? // 0) / 1e8 | floor / 10), store: .[2]})'
 }
 
 # forget_folder <folder>: delete one folder unoffered lists, under the models folder, when no download is writing it
@@ -1420,7 +1534,7 @@ forget_folder() {
   flock -w 10 9 || die "another model operation is running; try again"
   deployed_paths >/dev/null || die "stop existing models before removing downloads"
   unoffered | jq -e --arg n "$n" 'any(.[]; .folder == $n)' >/dev/null || die "$n is offered or in use; it is not removed"
-  t=$MODELS/$n
+  t=$(store_of "$n")/$n
   # the folder's own download lock, and any lock inside it (an earlier version locked the weights' dir in it)
   exec 7>"$t.lock"
   flock -n 7 || die "$n is still downloading"
@@ -1459,8 +1573,15 @@ cmd_dirs() {
   [[ $d == /* && -d $d && -r $d && -x $d ]] || d=$HOME
   d=$(cd -- "$d" && pwd -P)
   find "$d" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -readable -printf '%f\0' 2>/dev/null | sort -z | head -z -n 400 |
-    jq -Rsc --arg d "$d" '{path: $d, parent: (if $d == "/" then "" else ($d | sub("/[^/]*$"; "") | if . == "" then "/" else . end) end),
-      dirs: (split("\u0000") | map(select(length > 0)))}'
+    jq -Rsc --arg d "$d" --argjson drives "$(drives)" '{path: $d, parent: (if $d == "/" then "" else ($d | sub("/[^/]*$"; "") | if . == "" then "/" else . end) end),
+      dirs: (split("\u0000") | map(select(length > 0))), drives: $drives}'
+}
+
+# drives: what is mounted where a plugged-in drive goes (/run/media/<you>, /media, /mnt), with its name and free space
+drives() {
+  findmnt -Jbo TARGET,LABEL,AVAIL,FSTYPE 2>/dev/null | jq -c --arg u "${USER:-$(id -un)}" '[.. | objects | select(.target? and (.target | type == "string")
+    and (.target | startswith("/run/media/\($u)/") or startswith("/media/") or startswith("/mnt/")))
+    | {path: .target, name: (.label // (.target | sub(".*/"; ""))), freeGb: ((.avail // 0) / 1e8 | floor / 10)}]' || echo '[]'
 }
 
 # set agent|folder <value> [recipe]: a model choice or the default. Recent folders are kept for next time.
@@ -1512,8 +1633,8 @@ cmd_card() {
 # forgets it. Its progress is in the snapshot's downloads until it finishes; a finished one is the recipe's
 # `downloaded`.
 cmd_download() {
-  valid_id "${1:-}" || die "download <recipe> [off]"
-  local id=${1%--*} r d pid
+  valid_id "${1:-}" || die "download <recipe> [off|<storage>]"
+  local id=${1%--*} r d pid to=""
   d=$STATE/downloads/$id
   if [[ ${2:-} == off ]]; then
     touch "$d/cancel" 2>/dev/null || true
@@ -1522,12 +1643,18 @@ cmd_download() {
     rm -rf -- "$d"
     return 0
   fi
+  if [[ -n ${2:-} ]]; then
+    load_stores
+    is_store "$2" || die "no such storage: $2"
+    connected "$2"
+    to=$2
+  fi
   r=$(recipe "$id") || die "no recipe $id"
   [[ $(policy "$r") == "ok" ]] || die "recipe refused: $(policy "$r")"
   [[ ! -f $d/status.json || $(jq -r .state "$d/status.json") == "error" ]] || die "$(jq -r .name <<<"$r") is already downloading"
   rm -rf -- "$d"
   mkdir -p "$d"
-  setsid "$0" __download "$id" </dev/null >/dev/null 2>&1 &
+  TO=$to setsid "$0" __download "$id" </dev/null >/dev/null 2>&1 &
   jq -nc --argjson p "$!" --arg t "$(now)" '{state: "download", detail: "starting", percent: 0, error: "", pid: $p, at: $t}' >"$d/status.json.$$"
   mv -f "$d/status.json.$$" "$d/status.json"
   disown
@@ -1551,6 +1678,145 @@ download_run() {
   fi
   rm -rf -- "$(dir_of "$id")"
   count downloaded
+}
+
+# store add <folder>: models can go to a local-ai-models folder made in <folder> (one already so named is used as it
+# is), named for its drive; store default <storage>: downloads go there; store remove <storage>: Local AI forgets it.
+# One holding models it put there is not forgotten while it is plugged in (move or remove them first); one that is not
+# plugged in is, with the record of what was on it (the files stay on the drive). This computer's is never removed.
+cmd_store() {
+  local k=${1:-} v=${2:-} f=$STATE/settings.json t name x
+  load_stores
+  case $k in
+  add)
+    [[ $v == /* && -d $v && -w $v ]] || die "choose a folder you can write to"
+    v=$(realpath -e -- "$v")
+    [[ ${v##*/} == local-ai-models ]] || v=$v/local-ai-models
+    for x in "${STORES[@]}"; do
+      [[ $v != "$x" ]] || die "Local AI already keeps models there"
+      [[ $v != "$x/"* && $x != "$v/"* ]] || die "that folder is inside another storage, or holds one"
+    done
+    (umask 022 && mkdir -p -- "$v")
+    owned "$v"
+    # named for its drive: its label, else the folder it is mounted at; any other folder by its own name
+    # (findmnt writes a space in a name as \x20)
+    t=$(printf '%b' "$(findmnt -rno TARGET -T "$v" 2>/dev/null | head -1)")
+    name=$(printf '%b' "$(findmnt -rno LABEL -T "$v" 2>/dev/null | head -1)")
+    if [[ -z $name ]]; then
+      if [[ $t == /run/media/*/* || $t == /media/* || $t == /mnt/* ]]; then name=${t##*/}; else name=${v%/local-ai-models}; name=${name##*/}; fi
+    fi
+    { cat "$f" 2>/dev/null || echo '{}'; } | jq --arg p "$v" --arg n "${name:-${v##*/}}" '.stores = ((.stores // []) + [{path: $p, name: $n}])' >"$f.$$"
+    ;;
+  default)
+    is_store "$v" || die "no such storage"
+    connected "$v"
+    { cat "$f" 2>/dev/null || echo '{}'; } | jq --arg p "$v" --arg m "$MODELS" 'if $p == $m then del(.store) else .store = $p end' >"$f.$$"
+    ;;
+  remove)
+    is_store "$v" && [[ $v != "$MODELS" ]] || die "no such storage"
+    if [[ -d $v ]] && { compgen -G "$v/*@*" || compgen -G "$v/prepared/*" || compgen -G "$v/hf/hub/*"; } >/dev/null; then
+      die "$(store_name "$v") still holds models; move or remove them first"
+    fi
+    { cat "$f" 2>/dev/null || echo '{}'; } | jq --arg p "$v" '.stores = [(.stores // [])[] | select(.path != $p)] | if .store == $p then del(.store) else . end' >"$f.$$"
+    x=$STATE/placed.json
+    if [[ -f $x ]]; then jq --arg p "$v" 'with_entries(select(.value != $p))' "$x" >"$x.$$" && mv -f "$x.$$" "$x"; fi
+    ;;
+  *) die "store add|default|remove <folder>" ;;
+  esac
+  mv -f "$f.$$" "$f"
+}
+
+# in_use <recipe>: a model here (running, starting or stopped and kept) uses any of its files, or one cannot tell
+in_use() {
+  local deployed p d
+  deployed=$(deployed_paths) || return 0
+  while IFS= read -r p; do
+    [[ -n $p ]] || continue
+    while IFS= read -r d; do
+      [[ -n $d ]] || continue
+      [[ ${p%/} != "${d%/}" && ${p%/} != "${d%/}/"* && ${d%/} != "${p%/}/"* ]] || return 0
+    done <<<"$deployed"
+  done < <(managed_paths "$1")
+  return 1
+}
+
+# move <recipe> <storage>: a model's files to another storage, in the background, its progress in the snapshot's
+# downloads as a download's is; never while a model here uses them or they download
+cmd_move() {
+  valid_id "${1:-}" || die "move <recipe> <storage>"
+  local id=${1%--*} r d to=${2:-}
+  load_stores
+  is_store "$to" || die "no such storage: $to"
+  connected "$to"
+  r=$(recipe "$id") || die "no recipe $id"
+  [[ $(policy "$r") == "ok" ]] || die "recipe refused: $(policy "$r")"
+  ! in_use "$r" || die "stop $(jq -r .name <<<"$r") before moving its files"
+  d=$STATE/downloads/$id
+  [[ ! -f $d/status.json || $(jq -r .state "$d/status.json") == "error" ]] || die "$(jq -r .name <<<"$r") is downloading or moving already"
+  rm -rf -- "$d"
+  mkdir -p "$d"
+  setsid "$0" __move "$id" "$to" </dev/null >/dev/null 2>&1 &
+  jq -nc --argjson p "$!" --arg t "$(now)" --arg to "moving to $(store_name "$to")" '{state: "download", detail: $to, percent: 0, error: "", pid: $p, at: $t}' >"$d/status.json.$$"
+  mv -f "$d/status.json.$$" "$d/status.json"
+  disown
+}
+move_run() {
+  local id=$1 to=$2 r p root u total=0 done=0 free sz pid fd units=() roots=() i
+  dir_of() { printf '%s/downloads/%s' "$STATE" "$1"; }
+  # the trap runs where this function's locals may be gone: what it needs is global
+  MOVING=$id MOVE_TMP=""
+  exec 2>>"$(dir_of "$id")/err"
+  MOVE_PID=""
+  trap 'rc=$?; [[ -z $MOVE_PID ]] || { kill "$MOVE_PID" 2>/dev/null; wait "$MOVE_PID" 2>/dev/null; }; [[ -z $MOVE_TMP ]] || rm -rf -- "$MOVE_TMP"; if ((rc)) && [[ ! -f $(dir_of "$MOVING")/cancel ]]; then status "$MOVING" error "" 0 "$(grep "^local-ai: " "$(dir_of "$MOVING")/err" 2>/dev/null | tail -1 | cut -c11- || true)"; fi' EXIT
+  # Cancel ends it with TERM: the trap still takes the half-made copy away
+  trap 'exit 143' TERM
+  load_stores
+  r=$(recipe "$id") || die "no recipe $id"
+  connected "$to"
+  # each folder it uses that is somewhere else, once
+  while IFS= read -r p; do
+    [[ -n $p && -e $p ]] || continue
+    root=$(store_root "$p")
+    [[ -n $root && $root != "$to" ]] || continue
+    u=$(unit_of "${p#"$root"/}")
+    printf '%s\n' "${units[@]+"${units[@]}"}" | grep -qxF -- "$u" && continue
+    units+=("$u") roots+=("$root")
+    total=$((total + $(du -sb -- "$root/$u" | cut -f1)))
+  done < <(managed_paths "$r")
+  free=$(df -B1 --output=avail -- "$to" | tail -1)
+  ((total < free)) || die "$(store_name "$to") has $((free / 1000000000)) GB free; these files take $(((total + 999999999) / 1000000000)) GB"
+  for i in "${!units[@]}"; do
+    u=${units[i]} root=${roots[i]}
+    # its download lock, so nothing downloads it or removes it meanwhile
+    exec {fd}>"$root/$u.lock"
+    flock -n "$fd" || die "its files are being downloaded; try again once that ends"
+    [[ -e $to/$u ]] && die "$(store_name "$to") already has $u"
+    (umask 022 && mkdir -p -- "$(dirname "$to/$u")")
+    MOVE_TMP=$(dirname "$to/$u")/.moving.${u##*/}
+    rm -rf -- "$MOVE_TMP"
+    cp -r --preserve=timestamps -- "$root/$u" "$MOVE_TMP" &
+    pid=$! MOVE_PID=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      # nothing yet, until cp makes the folder
+      sz=$(du -sb -- "$MOVE_TMP" 2>/dev/null | cut -f1) || sz=0
+      status "$id" download "moving to $(store_name "$to") · $(((done + ${sz:-0}) >> 30)) of $(((total + (1 << 30) - 1) >> 30)) GB" $(((done + ${sz:-0}) * 100 / (total + 1)))
+      if [[ -f $(dir_of "$id")/cancel ]]; then kill "$pid"; wait "$pid" || true; exit 0; fi
+      sleep 2
+    done
+    wait "$pid" || die "copying to $(store_name "$to") failed; the files stay where they were"
+    [[ $(du -sb --apparent-size -- "$MOVE_TMP" | cut -f1) == "$(du -sb --apparent-size -- "$root/$u" | cut -f1)" ]] ||
+      die "the copy on $(store_name "$to") came out a different size; the files stay where they were"
+    MOVE_PID=""
+    mv -T -- "$MOVE_TMP" "$to/$u"
+    MOVE_TMP=""
+    placed "$u" "$([[ $to == "$MODELS" ]] || printf '%s' "$to")"
+    rm -rf -- "${root:?}/$u"
+    done=$((done + $(du -sb -- "$to/$u" | cut -f1)))
+    exec {fd}>&-
+    rm -f -- "$root/$u.lock"
+  done
+  say "$id moved to $(store_name "$to")"
+  rm -rf -- "$(dir_of "$id")"
 }
 
 # pin <recipe> [off]: a model not on this machine, kept on home to try later, the latest first
@@ -1971,6 +2237,8 @@ SUMMARY='def folders: [.weights[]? | if .layout == "hub" then "" else "\(.reposi
 def downloaded($h): folders as $w | ($w | length) > 0 and all($w[]; . as $x | $x != "" and ($h.have | index($x + "/.verified2")) != null);
 # the bytes of its weights already on disk, checked or not (a download under way, or one an earlier version checked)
 def ondisk($h): [folders[] | $h.got[.] // 0] | add // 0 | . / 1e9 | . * 100 | floor / 100;
+# the storage its files are in (an index into $h.stores), on a drive not plugged in too; null when none are anywhere
+def store($h): first(folders[] | select(. != "") | split("/")[0] as $u | ($h.at // {})[.] // ($h.at // {})[$u] // empty) // null;
 # sharegb($h): what a vLLM recipe takes of a card that shares the host memory when it runs beside another model there:
 # what vLLM keeps besides its cache, and cache for its whole context and a tenth more, with 2 GB to spare. Both come
 # from a start of this recipe on this machine when there has been one ($h.fit, measured: the memory it was given, the
@@ -1990,7 +2258,7 @@ def sharegb($h): util as $m | (.serving.kvTokens // 0) as $k | (.serving.ctxToke
     else (($m * $t - 2 * $w - 3) / $k) as $b | [2 * $w + 3 + $b * ([$c * 1.1, $k] | min), $m * $t] | min | . * 10 | ceil / 10 end;
 def summary($h): {id, name, family, cards: (.cards // 1), format, engine, sizeGb, ctx: .serving.ctxTokens, kv: .serving.kvTokens, caps: .capabilities,
   reported: (.reported // false), aa, quant, speed, model, needs, weights: [.weights[]? | {repository, revision}], unfit: unfit($h),
-  downloaded: downloaded($h), onDiskGb: ondisk($h), shareGb: sharegb($h), fullGb: (util as $m | if $m != null and .engine == "vllm" then $m * ($h.ramGb // 0) | . * 10 | round / 10 else null end)};'
+  downloaded: downloaded($h), onDiskGb: ondisk($h), store: store($h), shareGb: sharegb($h), fullGb: (util as $m | if $m != null and .engine == "vllm" then $m * ($h.ramGb // 0) | . * 10 | round / 10 else null end)};'
 
 # downloads: each download under way or failed, with its id; one whose worker is gone has stopped
 downloads() {
@@ -2074,7 +2342,7 @@ cmd_snapshot() {
         + ([$rec[0].hardware[].recipes[] | select(.id == $rid)][0] // {} | summary($host) | del(.id, .unfit) | with_entries(select(.value != null))) + .]) as $deps
     | ([$deps[].keys[]]) as $busy
     | ([$g[] | select((.held or (.usedMiB // 0) > 2048) and (.key as $k | $busy | index($k) == null)) | .key]) as $taken
-    | {version: $version, setupError: $setupError, readiness: {state: $rstate, message: $rmsg}, host: ($host | del(.have, .got, .fit)), week: $tokens.week, total: $tokens.total, life: $tokens.life, defaults: {agent: $agent, folder: $folder}, reporting: $reporting, agents: $agents, folders: $folders, pins: $pins, tailnet: $ts,
+    | {version: $version, setupError: $setupError, readiness: {state: $rstate, message: $rmsg}, host: ($host | del(.have, .got, .fit, .at)), week: $tokens.week, total: $tokens.total, life: $tokens.life, defaults: {agent: $agent, folder: $folder}, reporting: $reporting, agents: $agents, folders: $folders, pins: $pins, tailnet: $ts,
        cdi: (if $cdi == "" then null else ($cdi | split("\t") | {spec: .[0], why: .[1]}) end),
        downloads: $downloads, updates: $outdated.updates, updatesAt: $outdated.at,
        # what a recipe this version no longer offers left behind: folders to remove, downloads to clear
@@ -2131,7 +2399,7 @@ fi
 # the verbs that use Docker run under the docker group, whatever groups this login began with
 case ${1:-} in snapshot | run | stop | remove | readiness | download | open | share | forget) docker_group_reexec "$TARGET" "$@" ;; esac
 case ${1:-} in
-setup | registry | forget | snapshot | readiness | run | stop | open | update | outdated | set | dirs | share | pin | download | card) "cmd_$1" "${@:2}" ;;
+setup | registry | forget | snapshot | readiness | run | stop | open | update | outdated | set | dirs | share | pin | download | card | store | move) "cmd_$1" "${@:2}" ;;
 # the stale NVIDIA device list, if any, as "<spec>\t<why>" (setup rewrites it)
 cdi) cdi_stale ;;
 log) exec omarchy-launch-tui --app-id=org.omarchy.local-ai-log less +G "$LOG" ;;
@@ -2143,11 +2411,13 @@ remove)
   # everything else goes even when one folder cannot: Docker creates a missing mount source as root
   left=()
   # the catalog an earlier version refreshed (v3) goes too
-  for p in "$MODELS" "${CATALOG%/*}" "${CATALOG%/*/*}/v3" "$STATE"; do rm -rf -- "$p" 2>/dev/null || left+=("$p"); done
+  load_stores
+  for p in "${STORES[@]}" "${CATALOG%/*}" "${CATALOG%/*/*}/v3" "$STATE"; do rm -rf -- "$p" 2>/dev/null || left+=("$p"); done
   ((${#left[@]} == 0)) || die "everything else was removed; these hold files Docker created as root, delete them as root: ${left[*]}"
   ;;
 __worker) worker_run "${@:2}" ;;
 __download) download_run "${@:2}" ;;
+__move) move_run "${@:2}" ;;
 *)
   sed -n 's/^# omarchy:args=//p' "$0"
   exit 2

@@ -295,15 +295,15 @@ js() {
     const x = eval(process.argv[3]); console.log(typeof x === "string" ? x : JSON.stringify(x))' "$ROOT/Model.js" "$TMP/snap.json" "$1"
 }
 if command -v node >/dev/null; then
-  [[ $(view home) == " tabs,life,sec,mrow,sec,field,field,field,field" ]] || fail "home view" "$(view home 2>&1)"
+  [[ $(view home) == " tabs,life,sec,mrow,sec,field,field,field,field,field" ]] || fail "home view" "$(view home 2>&1)"
   [[ $(view kind rtx-4090-24gb) == " links,acts,field" ]] || fail "kind view" "$(view kind rtx-4090-24gb 2>&1)"
   pass "the view model builds home and the free card's page from the backend's own snapshot"
   # a crashed model whose card no GPU row shows (nvidia-smi failing after a driver update, a card taken out, a card
   # with no kind) is a row of its own with its reason and dismiss; a state the panel does not know yet still shows
   [[ $(js 's.deployments = [{id: "m", name: "M", keys: ["nvidia:9"], state: "error", error: "gone"}]; var v = c.build(s, ui())
-    v.mark + " " + v.rows.map(r => r.type + (r.crashed ? ":" + r.label + ":" + r.dismiss : r.type === "error" ? ":" + r.label : "")).join(",")') == "failed tabs,life,slot:M:stop|m,error:gone,sec,mrow,sec,field,field,field,field" &&
+    v.mark + " " + v.rows.map(r => r.type + (r.crashed ? ":" + r.label + ":" + r.dismiss : r.type === "error" ? ":" + r.label : "")).join(",")') == "failed tabs,life,slot:M:stop|m,error:gone,sec,mrow,sec,field,field,field,field,field" &&
     $(js 's.gpus = []; s.deployments = [{id: "m", name: "M", keys: ["nvidia:0"], state: "error", error: "gone"}];
-    c.build(s, ui({open: "lost:m"})).rows.filter(r => r.label || r.items).map(r => r.type + ":" + (r.label || r.items[0].label)).join(",")') == "tabs:home,slot:M,error:gone,links:View logs,sec:RECOMMENDED,sec:THIS MACHINE,field:hardware,field:RAM,field:Agents,field:Settings" &&
+    c.build(s, ui({open: "lost:m"})).rows.filter(r => r.label || r.items).map(r => r.type + ":" + (r.label || r.items[0].label)).join(",")') == "tabs:home,slot:M,error:gone,links:View logs,sec:RECOMMENDED,sec:THIS MACHINE,field:hardware,field:RAM,field:Agents,field:Storage,field:Settings" &&
     $(js 's.deployments = [{id: "m", name: "M", keys: ["nvidia:1"], state: "error", error: "gone"}]; c.build(s, ui()).rows.filter(r => r.crashed).length') == 1 ]] ||
     fail "a crashed model on no listed card" "$(js 's.deployments = [{id: "m", name: "M", keys: ["nvidia:9"], state: "error"}]; c.build(s, ui())')"
   [[ $(js 's.deployments = [{id: "m", name: "M", keys: [], state: "pulling", detail: "pulling image"}]; var v = c.build(s, ui())
@@ -364,7 +364,7 @@ cdi 237
 "$CLI" run "$ID" nvidia:0
 wait_for error
 [[ $(jq -r .error "$STATE/deploy/$ID/status.json") == "the NVIDIA device list is out of date (/dev/null has moved): choose Set up Local AI to regenerate it" ]] ||
-  fail "stale CDI reason" "$(cat "$STATE/deploy/$ID/status.json")"
+  fail "stale CDI reason" "$(cat "$STATE/deploy/$ID/status.json"; tail -5 "$STATE/deploy/$ID/err")"
 ! grep -q "^run .*--name $(printf 'omarchy-local-ai-%s-%s-engine' "$(id -u)" "$ID")" "$SHIM/docker.log" 2>/dev/null || fail "an engine started on a stale CDI spec" "$(cat "$SHIM/docker.log")"
 cdi 1
 grep -q "regenerate it as root: nvidia-ctk cdi generate --output=$CDI_DIRS/nvidia.yaml" "$STATE/log" || fail "CDI repair log"
@@ -384,7 +384,7 @@ cdi 1
 wait_for ready
 "$CLI" snapshot >"$TMP/snap.json"
 if command -v node >/dev/null; then
-  [[ $(view home) == "ready tabs,life,run,sec,field,field,field,field" && $(view run "$ID") == "ready links,acts,field" ]] ||
+  [[ $(view home) == "ready tabs,life,run,sec,field,field,field,field,field" && $(view run "$ID") == "ready links,acts,field" ]] ||
     fail "running views" "$(view home 2>&1; view run "$ID" 2>&1)"
   pass "the view model builds home and the model's page for a running model"
 fi
@@ -889,7 +889,7 @@ rm "$SHIM/containers/omarchy-local-ai-gone-model-engine"
 "$CLI" stop gone-model && [[ ! -d $gone ]] || fail "stop an unoffered model"
 mkdir -p "$MODELS/old--gone@bbbbbbbbbbbb"; head -c 2048 /dev/zero >"$MODELS/old--gone@bbbbbbbbbbbb/w.bin"
 "$CLI" snapshot >"$TMP/snap-gone3.json"
-[[ $(jq -c '.unoffered.folders' "$TMP/snap-gone3.json") == '[{"folder":"old--gone@bbbbbbbbbbbb","gb":0}]' ]] || fail "unoffered folders" "$(jq -c .unoffered "$TMP/snap-gone3.json")"
+[[ $(jq -c '.unoffered.folders' "$TMP/snap-gone3.json") == '[{"folder":"old--gone@bbbbbbbbbbbb","gb":0,"store":"this computer"}]' ]] || fail "unoffered folders" "$(jq -c .unoffered "$TMP/snap-gone3.json")"
 used=$(ls "$MODELS" | grep -m1 '^test--model@') || fail "the running model's folder"
 "$CLI" forget --folder "$used" 2>"$TMP/err" && fail "removed a folder a recipe uses"
 grep -q 'is offered or in use' "$TMP/err" || fail "used folder" "$(cat "$TMP/err")"

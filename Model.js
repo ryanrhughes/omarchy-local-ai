@@ -151,6 +151,8 @@ function homeView(s, ui) {
   rows.push({ type: "field", icon: "gpu", label: "hardware", value: String(s.gpus.length), action: "gpus" })
   if (s.host && s.host.ramGb) rows.push({ type: "field", icon: "memory", label: "RAM", value: Math.floor(s.host.freeRamGb) + " / " + Math.floor(s.host.ramGb) + " GB free" })
   rows.push({ type: "field", icon: "agent", label: "Agents", value: String((s.agents || []).length), action: "agents" })
+  var st = (s.host || {}).stores || [], dst = st.filter(function(x) { return x.default })[0]
+  if (dst) rows.push({ type: "field", icon: "disk", label: "Storage", value: st.length > 1 ? st.length + " places \u00b7 " + gb(dst.freeGb) + " free on " + dst.name : gb(dst.freeGb) + " free", action: "settings" })
   rows.push({ type: "field", icon: "settings", label: "Settings", value: "", action: "settings" })
   // a stale NVIDIA device list (a card taken out, a driver update) stops starts on NVIDIA cards: setup rewrites it
   if (s.cdi && s.gpus.some(function(g) { return g.backend === "nvidia" }))
@@ -212,7 +214,7 @@ function pickBest(list) {
 // on one card or across a group of them (when the machine has that many). Each says where it runs, whether it runs
 // now, whether it fits the machine (RAM, disk, NVMe), whether its cards are free, and whether it is pinned.
 function catalog(s) {
-  var out = [], pins = s.pins || []
+  var out = [], pins = s.pins || [], stores = (s.host || {}).stores || []
   // two recipes that would read the same (a model, its format, its card) are told apart by what differs: the
   // detail their format carries, e.g. "55 GB RAM" against "experts in RAM"
   ;(s.kinds || []).forEach(function(kd, at) {
@@ -237,10 +239,13 @@ function catalog(s) {
       var d = (s.deployments || []).filter(function(x) { return x.id === r.id || x.id.indexOf(r.id + "--") === 0 })[0]
       // a setup across more cards than the machine has is listed as too big, saying how many it takes
       var sp = r.speed || {}, onDisk = !!r.downloaded || (r.sizeGb > 0 && r.onDiskGb >= r.sizeGb * 0.98)
+      // the storage its files are on when it is not this computer's; one on a drive not plugged in is away
+      var st = r.store != null ? stores[r.store] : null
       out.push({ id: r.id, name: r.name, title: title(r), quant: quantOf(r), family: r.family, format: r.format, engine: r.engine || "", ctx: r.ctx, size: r.sizeGb,
         needs: r.needs || {}, hw: hw, n: n, d: d || null, caps: r.caps || {}, model: r.model || {}, kinds: (s.kinds || []).length,
         speed: sp.decode != null ? sp.decode : null, prefill: sp.prefill != null ? sp.prefill : null, measured: sp.at || "", source: sp.source || "",
         fits: fits(r) && !short_, unfit: short_ ? "needs " + n + " × " + hw + ", this machine has " + kd.keys.length : r.unfit || "",
+        store: r.store != null ? r.store : null, where: st && !st.primary ? st.name : "", away: !!st && !st.connected,
         downloaded: !!r.downloaded, onDisk: onDisk, part: !onDisk && r.sizeGb > 0 && r.onDiskGb > 0 ? Math.floor(r.onDiskGb / r.sizeGb * 100) : 0,
         dl: find(s.downloads || [], "id", r.id), reported: !!r.reported, aa: r.aa != null ? r.aa : null,
         free: kd.free.length >= n, pin: pins.indexOf(r.id), rec: !!rec[r.id], fastest: !!quick && quick === r && !rec[r.id] && kd.models.filter(fits).length > 1,
@@ -255,6 +260,13 @@ function catalog(s) {
           + (on.some(function(x) { return !x.share }) ? "; " + on.filter(function(x) { return !x.share }).map(function(x) { return [title(x), quantOf(x)].filter(Boolean).join(" ") }).join(", ") + " restarts with a smaller cache first" : "") : "",
         action: d ? "more|" + d.id : short_ ? "" : n > 1 ? "group|" + kd.hw + "|" + n + "|" + r.id : "kind|" + kd.hw + "|" + (kd.free[0] || kd.keys[0]) + "|" + r.id })
     })
+  })
+  // where a download goes (the default storage) and the others it can go to, plugged in; where files here can move to
+  var dflt = stores.filter(function(x) { return x.default })[0], live = stores.filter(function(x) { return x.connected })
+  out.forEach(function(c) {
+    c.dest = dflt ? dflt.name : ""
+    c.others = live.filter(function(x) { return x !== dflt })
+    c.moves = c.store != null ? live.filter(function(x) { return x !== stores[c.store] }) : []
   })
   // how smart each is against the smartest here, in five steps
   var top = Math.max.apply(null, out.map(function(c) { return c.aa || 0 }).concat([1]))
@@ -299,8 +311,8 @@ function mrow(c) {
   } else right = tps(c.speed)
   // what it is to you, drawn as marks: how smart against the rest here, its context, what it takes on disk and whether
   // that is here, a download, or here but for a part; what it can do
-  var info = !c.fits ? null : { pips: c.pips, ctx: c.ctx ? ctx(c.ctx) : "", size: c.size ? gb(c.size) : "",
-    disk: c.onDisk ? "here" : c.part > 0 ? "part" : "download", rest: c.part > 0 && !c.onDisk ? gb(c.size * (100 - c.part) / 100) : "",
+  var info = !c.fits ? null : { pips: c.pips, ctx: c.ctx ? ctx(c.ctx) : "", size: c.size ? gb(c.size) : "", where: c.away ? c.where + " not connected" : c.where,
+    disk: c.away ? "away" : c.onDisk ? "here" : c.part > 0 ? "part" : "download", rest: c.part > 0 && !c.onDisk ? gb(c.size * (100 - c.part) / 100) : "",
     on: c.kinds > 1 || c.n > 1 ? c.on : "", caps: ["vision", "tools", "reasoning"].filter(function(k) { return c.caps[k] }) }
   if (!c.fits) meta.push(c.unfit)
   else {
@@ -317,7 +329,7 @@ function mrow(c) {
   return { type: "mrow", family: c.family || "", title: c.title, quant: c.variant ? c.quant + " · " + c.variant : c.quant, tags: tags, right: right,
     meta: meta, info: info, alert: !c.fits, here: c.onDisk || c.part > 0, live: live, progress: progress, on: c.on, act: quick(c),
     // dim: nothing to do with it here now, neither start it nor switch to it
-    dim: !c.d && (!c.fits || (!c.free && !c.swap)), action: c.action, id: c.id }
+    dim: !c.d && (!c.fits || c.away || (!c.free && !c.swap)), action: c.action, id: c.id }
 }
 // The one thing a row does in a click, shown in place of its speed while the pointer is on it: Open a running model,
 // Start one that is here or fits (a start downloads what is missing), Switch to it when your model holds its card,
@@ -325,7 +337,7 @@ function mrow(c) {
 function quick(c) {
   if (c.d) return c.d.state === "ready" ? { label: "Open ›", action: "open|" + c.d.id } : null
   if (c.dl && c.dl.state === "download") return { label: "Cancel", action: "download|" + c.id + "|off" }
-  if (!c.fits) return null
+  if (!c.fits || c.away) return null
   // one not here is downloaded first, on its own; Start (or Switch) once it is
   if (!here(c)) return { label: "Download", action: "download|" + c.id }
   if (c.free && c.run) return { label: "Start ›", action: c.run }
@@ -333,7 +345,7 @@ function quick(c) {
   return null
 }
 // what is on this machine: all of it, or all but a draft or the rest of a download
-function here(c) { return c.downloaded || c.onDisk || c.part > 0 }
+function here(c) { return c.downloaded || c.onDisk || c.part > 0 || c.away }
 // a list of models, each opening in place to manage it, on the page's own gutter like every other row
 function list(cs, ui) {
   var rows = []
@@ -352,9 +364,10 @@ function state(c) {
   if (c.d) return c.d.state === "ready" ? "running on " + c.on : c.d.state === "error" ? "stopped: " + (c.d.error || "the engine stopped") : (c.d.detail || c.d.state)
   if (c.dl) return c.dl.state === "error" ? "download failed: " + (c.dl.error || "try again") : "downloading · " + (c.dl.detail || "") + (c.dl.percent > 0 ? " · " + c.dl.percent + "%" : "")
   if (!c.fits) return c.unfit
+  if (c.away) return "its files are on " + c.where + ", which is not plugged in; plug it in to start it"
   var here = c.downloaded ? "downloaded" : c.onDisk ? "on disk; its files are checked when it first starts"
     : c.part > 0 ? "on disk but for " + gb(c.size * (100 - c.part) / 100) + ", which Start downloads first" : "starts with a " + gb(c.size || 0) + " download"
-  return here + (c.free ? "" : c.swap ? " · Switch stops " + c.swapFrom + " first" : " · its card is in use")
+  return here + (c.where && here !== "starts with a " + gb(c.size || 0) + " download" ? " on " + c.where : "") + (c.free ? "" : c.swap ? " · Switch stops " + c.swapFrom + " first" : " · its card is in use")
     + (c.reported ? " · reported by its publisher, not yet run by the lab" : "")
 }
 // what it is good for, in a sentence: the registry's, else nothing
@@ -370,18 +383,23 @@ function manage(c) {
   if (c.d && c.d.state === "ready") items.push({ label: "Open ›", action: "open|" + c.d.id, primary: true }, { label: "Stop", action: stop(c.d), danger: true })
   else if (c.d) items.push({ label: "Stop", action: stop(c.d), danger: true })
   // one not here downloads first; Start downloads and then starts it
-  else if (c.fits && !here(c) && !c.dl) items.push({ label: "Download", action: "download|" + c.id, primary: true },
+  else if (c.fits && !here(c) && !c.dl) items.push({ label: c.others.length ? "Download to " + c.dest : "Download", action: "download|" + c.id, primary: true },
     c.free && c.run ? { label: "Download and start ›", action: c.run } : c.swap ? { label: "Download and switch ›", action: c.swap } : null)
+  else if (c.away) {}
   else if (c.fits && c.free && c.run) items.push({ label: "Start ›", action: c.run, primary: true })
   else if (c.swap) items.push({ label: "Switch to this ›", action: c.swap, primary: true })
-  if (c.beside) items.push({ label: "Run alongside", action: c.beside })
+  // to another storage than the default, plugged in
+  if (c.fits && !here(c) && !c.dl && !c.d) c.others.forEach(function(o) { items.push({ label: "Download to " + o.name, action: "download|" + c.id + "|" + encodeURIComponent(o.path) }) })
+  if (c.beside && !c.away) items.push({ label: "Run alongside", action: c.beside })
+  // files here move to any other storage plugged in, while nothing runs them
+  if (!c.d && !c.dl && !c.away && (c.downloaded || c.onDisk)) c.moves.forEach(function(o) { items.push({ label: "Move to " + o.name, action: "move|" + c.id + "|" + encodeURIComponent(o.path) }) })
   if (!c.d) {
-    if (c.dl && c.dl.state === "download") items.push({ label: "Cancel download", action: "download|" + c.id + "|off" })
+    if (c.dl && c.dl.state === "download") items.push({ label: /^moving/.test(c.dl.detail || "") ? "Cancel move" : "Cancel download", action: "download|" + c.id + "|off" })
     else if (c.downloaded || c.onDisk) items.push({ label: "Remove download", action: "forget|" + c.id, danger: true })
     else if (c.fits && (c.dl || c.part)) items.push({ label: "Resume download", action: "download|" + c.id })
   }
   // a model on this machine is on home already; one that is not can be pinned there to try later
-  if (!c.d && !c.dl && !c.downloaded && !c.onDisk) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
+  if (!c.d && !c.dl && !here(c)) items.push({ label: c.pin >= 0 ? "Unpin" : "Pin to home", action: "pin|" + c.id + (c.pin >= 0 ? "|off" : "") })
   items.push({ label: "Details ›", action: c.action })
   // the marks on its row in words
   var can = [c.caps.vision ? "sees images" : "", c.caps.tools ? "calls tools" : "", c.caps.reasoning ? "thinks before it answers" : ""].filter(Boolean)
@@ -416,7 +434,7 @@ function unoffered(s) {
   if (!f.length && !d.length) return rows
   rows.push({ type: "sec", label: "NO LONGER OFFERED" })
   f.forEach(function(x) {
-    rows.push({ type: "field", icon: "weights", label: x.folder, value: gb(x.gb) })
+    rows.push({ type: "field", icon: "weights", label: x.folder, value: gb(x.gb) + (x.store && ((s.host || {}).stores || []).length > 1 ? " on " + x.store : "") })
     rows.push({ type: "links", items: [{ label: "Remove", action: "discard|" + x.folder }] })
   })
   d.forEach(function(x) {
@@ -822,6 +840,7 @@ function folderView(s, ui) {
   var b = ui.browse, id = ui.id || "", rows = []
   if (!b) return { back: true, where: "folder", rows: [{ type: "field", label: "reading folders", value: "…" }] }
   var go = function(p) { return "browse|" + encodeURIComponent(p) }
+  if (ui.key === "store") return storeFolder(s, b, go)
   rows.push({ type: "sec", label: "THE AGENT'S FOLDER" })
   rows.push({ type: "field", icon: "folder", label: "this folder", value: home(b.path) })
   rows.push({ type: "links", items: [{ label: "Use this folder", action: "usefolder|" + id + "|" + encodeURIComponent(b.path) }] })
@@ -837,6 +856,24 @@ function folderView(s, ui) {
   return { back: true, where: "folder", rows: rows }
 }
 
+// Where models can go: the drives plugged in, then this folder and the ones in it; models go in a local-ai-models
+// folder made in the one chosen
+function storeFolder(s, b, go) {
+  var rows = []
+  if ((b.drives || []).length) {
+    rows.push({ type: "sec", label: "DRIVES", note: "plugged in" })
+    b.drives.forEach(function(d) { rows.push({ type: "field", icon: "usb", label: d.name, value: gb(d.freeGb) + " free", action: go(d.path) }) })
+  }
+  rows.push({ type: "sec", label: "KEEP MODELS HERE?" })
+  rows.push({ type: "field", icon: "folder", label: "this folder", value: home(b.path) })
+  rows.push({ type: "links", note: "Models go in a local-ai-models folder made here.", items: [{ label: "Keep models here", action: "store|add|" + encodeURIComponent(b.path), primary: true }] })
+  rows.push({ type: "sec", label: "FOLDERS" })
+  if (b.parent) rows.push({ type: "field", icon: "up", label: "up to " + home(b.parent), value: "", action: go(b.parent) })
+  b.dirs.forEach(function(d) { rows.push({ type: "field", icon: "folder", label: d, value: "", action: go(b.path.replace(/\/$/, "") + "/" + d) }) })
+  if (!b.dirs.length) rows.push({ type: "field", label: "no folders inside", value: "" })
+  return { back: true, where: "where to keep models", rows: rows }
+}
+
 // Settings: usage reporting, off until turned on here or with Allow on home (never with DO_NOT_TRACK), and exactly what
 // it sends
 var REPORTING = "Reporting is minimal and anonymous. There is no user or account ID: at most twice a day Local AI sends " +
@@ -845,7 +882,7 @@ var REPORTING = "Reporting is minimal and anonymous. There is no user or account
   "sends your prompts, files, folders, model names or agents, and your IP address is not stored. Until you turn it on, " +
   "and once you turn it off, nothing is sent and counts not yet sent are deleted."
 function settingsView(s, ui) {
-  var on = s.reporting === "on", rows = [{ type: "sec", label: "USAGE REPORTING" }]
+  var on = s.reporting === "on", rows = storage(s, ui).concat([{ type: "sec", label: "USAGE REPORTING" }])
   if (s.reporting === "env") rows.push({ type: "field", label: "send usage reports", value: "off (DO_NOT_TRACK is set)" })
   else rows.push({ type: "field", icon: on ? "check" : "", label: "send usage reports", value: on ? "on" : "off",
     action: "set|ping|" + (on ? "off" : "on") })
@@ -853,12 +890,33 @@ function settingsView(s, ui) {
   return { back: true, where: "settings", rows: rows }
 }
 
+// Storage: where models are kept, this computer's folder and any added on other drives, each with what it holds and
+// has free; the default, where downloads go, is marked. One opens in place to become the default or be removed; a
+// model's own row moves it between them.
+function storage(s, ui) {
+  var st = (s.host || {}).stores || [], rows = [{ type: "sec", label: "STORAGE", note: "where models are kept" }]
+  st.forEach(function(x, i) {
+    rows.push({ type: "field", icon: x.primary ? "disk" : "usb", label: x.name + (x.default && st.length > 1 ? "  \u00b7 default" : ""),
+      value: !x.connected ? "not connected" : (x.usedGb ? gb(x.usedGb) + " used \u00b7 " : "") + gb(x.freeGb) + " free", warn: !x.connected,
+      drop: true, open: ui.open === "st:" + i, action: "pick|st:" + i })
+    if (ui.open !== "st:" + i) return
+    var held = (s.kinds || []).reduce(function(a, k) { return a + k.models.concat(k.groups || []).filter(function(r) { return r.store === i }).length }, 0)
+    rows.push({ type: "links", inset: true, note: [home(x.path), x.default ? "New downloads go here." : "",
+      !x.connected ? "Plug it in to start the models on it." + (held ? " Removing it forgets them here; their files stay on the drive." : "") : "", x.disk && x.disk !== "nvme" ? "Not an NVMe drive: models load more slowly from it, and those that read from disk while they run cannot use it." : ""].filter(Boolean).join("\n"),
+      items: [!x.default && x.connected ? { label: "Make default", action: "store|default|" + encodeURIComponent(x.path), primary: true } : null,
+        !x.primary && !(held && x.connected) ? { label: "Remove", action: "store|remove|" + encodeURIComponent(x.path), danger: true } : null].filter(Boolean) })
+    if (!x.primary && held && x.connected) rows[rows.length - 1].note += "\nMove its models off it to remove it."
+  })
+  rows.push({ type: "field", icon: "plus", label: "Add a drive or folder", value: "", action: "addstore" })
+  return rows
+}
+
 function build(s, ui) {
   s = s || {}
   var v = (ui.view === "settings" ? settingsView(s, ui) : ui.view === "folder" ? folderView(s, ui) : ui.view === "agents" ? agentsView(s, ui) : ui.view === "run" ? runView(s, ui.id, ui) : ui.view === "kind" ? kindView(s, ui.id, ui) : ui.view === "gpus" ? gpusView(s, ui) : ui.view === "group" ? groupView(s, ui.id, Number(ui.key), ui) : null) || homeView(s, ui)
   // A page has one way back, up to where it belongs: a model's page to the tab it was opened from, the folder to what
   // it is for, every other page to home
-  if (v.back) v.up = ui.view === "folder" ? (ui.id ? { label: "model", action: "more|" + ui.id } : { label: "agents", action: "agents" })
+  if (v.back) v.up = ui.view === "folder" ? (ui.key === "store" ? { label: "settings", action: "settings" } : ui.id ? { label: "model", action: "more|" + ui.id } : { label: "agents", action: "agents" })
     : /^(run|kind|group)$/.test(ui.view) && ui.from === "models" ? { label: "get models", action: "models" } : { label: "home", action: "home" }
   // usage reporting is off until you choose: home asks once, and either answer is kept and ends the question; No thanks
   // comes first, so the first keyboard focus never turns it on
