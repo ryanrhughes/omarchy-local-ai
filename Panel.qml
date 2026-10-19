@@ -28,7 +28,7 @@ Panel {
   // Nerd Font glyphs for the icon names Model.js uses
   readonly property var glyphs: ({ gpu: 0xf08ae, memory: 0xf035b, temp: 0xf050f, context: 0xf09aa, weights: 0xf01a7, vision: 0xf06d0,
     speed: 0xf140c, tokens: 0xf04a0, agent: 0xf07b7, folder: 0xf0256, machine: 0xf0379, tailnet: 0xf0317, check: 0xf012c, down: 0xf0140, up: 0xf0143, full: 0xf0293, unfull: 0xf0294, more: 0xf01d8, settings: 0xf0493,
-    smart: 0xf09d1, see: 0xf0208, tools: 0xf05b7, reasoning: 0xf0335, disk: 0xf02ca, download: 0xf01da })
+    smart: 0xf09d1, see: 0xf0208, tools: 0xf05b7, reasoning: 0xf0335, disk: 0xf02ca, download: 0xf01da, search: 0xf0349, clear: 0xf0156 })
   function glyph(name) { return glyphs[name] ? String.fromCodePoint(glyphs[name]) : "" }
 
   // Four tones, each picked by the APCA contrast it must reach on a card (Model.tones): ink for what matters
@@ -133,7 +133,6 @@ Panel {
     if (moved) topTick++
   }
   function home() { nav({ view: "home", id: "", key: "", query: "" }) }
-  // typing anywhere on home searches its models; Backspace takes a letter back (Escape clears it, below)
   // Keyboard: Up and Down (or Tab and Shift+Tab) move the ring through what can be clicked, in the order it is on
   // screen, scrolling it into view; Enter clicks it
   property var clicks: []
@@ -158,16 +157,27 @@ Panel {
     if (event.key === Qt.Key_Down || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) { step(1); return true }
     if (event.key === Qt.Key_Up || event.key === Qt.Key_Backtab) { step(-1); return true }
     if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && focused) { var a = focused.action; activate(a); return true }
+    // Return in a search opens its first match
+    if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && ui.view === "models" && ui.query) {
+      var first = (view.rows || []).filter(function(r) { return r.type === "mrow" })[0]
+      if (first) activate(first.action)
+      return true
+    }
     if (event.modifiers & Qt.AltModifier && event.key === Qt.Key_Left) { stepBack(null); return true }
     if (ui.view !== "home" && ui.view !== "models") return false
     var q = ui.query || ""
     if (event.key === Qt.Key_Backspace) q = q.slice(0, -1)
     else if (event.text && event.text.length === 1 && event.text >= " " && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) q += event.text
     else return false
-    // typing searches the models tab
-    ui = Object.assign({}, ui, { view: "models", query: q })
-    topTick++
+    search(q)
     return true
+  }
+  // the keyboard to an item once what is being built or torn down settles; nothing if it is gone by then
+  function focusLater(item) { Qt.callLater(function() { if (item && item.forceActiveFocus) item.forceActiveFocus() }) }
+  // a search: on the models tab, from its top, nothing opened
+  function search(q) {
+    ui = Object.assign({}, ui, { view: "models", query: q, open: "" })
+    topTick++
   }
   function run(args) { queue.push(args); if (!verb.running) next() }
   function next() {
@@ -186,8 +196,10 @@ Panel {
     // the tabs sit a group apart from what is above and below them
     if (t === "tabs") return i === 0 ? topGap : groupGap
     if (i > 0 && rows[i - 1].type === "tabs") return topGap
+    // what a search found, or that it found nothing, sits a group below the field
+    if (i > 0 && rows[i - 1].type === "search") return groupGap
     if (i === 0 && !view.hero && t !== "sec") return topGap
-    if (t === "sec" || t === "acts" || t === "error" || t === "search" || t === "banner" || t === "thead" && rows[i].pair) return groupGap
+    if (t === "sec" || t === "acts" || t === "error" || t === "search" || t === "banner" || t === "foot" || t === "thead" && rows[i].pair) return groupGap
     if (t === "run" || t === "grid") return i === 0 && !view.hero ? topGap : blockGap
     return i === 0 ? topGap : 0
   }
@@ -372,6 +384,7 @@ Panel {
     Rectangle { anchors.fill: parent; color: root.bg }
     Item {
       id: keys
+      objectName: "local-ai-keys"
       anchors.fill: parent
       focus: true
       Keys.onPressed: function(event) { if (root.type(event)) event.accepted = true }
@@ -388,6 +401,7 @@ Panel {
   Component {
     id: fullBody
     Item {
+      objectName: "local-ai-keys"
       anchors.fill: parent
       focus: true
       Keys.onPressed: function(event) { if (root.type(event)) event.accepted = true }
@@ -522,8 +536,8 @@ Panel {
             x: inset
             y: parent.gap
             width: parent.width - 2 * inset
-            sourceComponent: r.type === "sec" && (r.items || r.note) ? secC : ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
-              field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, mrow: mrowC, tabs: tabsC, banner: bannerC, card: cardC })[r.type] || textC
+            sourceComponent: r.type === "sec" && (r.items || r.note || r.count) ? secC : ({ life: lifeC, run: runC, slot: slotC, links: linksC, grid: gridC, gpu: gpuC,
+              field: fieldC, agent: agentC, acts: linksC, search: searchC, thead: tableC, trow: tableC, mrow: mrowC, tabs: tabsC, banner: bannerC, foot: footC, card: cardC })[r.type] || textC
           }
 
           // Your lifetime: the totals, then the activity grid (a column a week, a row a weekday) with its months
@@ -734,7 +748,7 @@ Panel {
               spacing: Style.space(8)
               // under an opened model row, its text lines up with the row's name
               readonly property real indent: r.inset ? root.gutter + Style.space(24) : root.gutter
-              Chips { visible: (r.chips || []).length > 0; x: parent.indent; items: r.chips || [] }
+              Chips { visible: (r.chips || []).length > 0; x: parent.indent; width: parent.width - parent.indent - root.gutter; items: r.chips || [] }
               Label { visible: !!r.note; x: parent.indent; width: parent.width - parent.indent - root.gutter; text: r.note || ""; color: root.labelTone; wrapMode: Text.WordWrap }
               // the same buttons as a model card's: filled for the main action, outlined for the rest
               Flow {
@@ -768,6 +782,14 @@ Panel {
                 Label { id: secLabel; text: r.label || ""; color: root.labelTone }
                 Label { visible: !!r.note; anchors.baseline: secLabel.baseline; text: r.note || ""; color: Util.alpha(root.labelTone, 0.6); font.pixelSize: Style.font.bodySmall }
               }
+              // a folded section: its count and which way it opens, the whole line a click
+              Right {
+                visible: r.count !== undefined
+                margin: root.gutter
+                text: (r.count || 0) + "  " + root.glyph(r.open ? "up" : "down")
+                color: r.open ? root.ink : root.valueTone
+              }
+              Click { visible: r.count !== undefined; action: r.action || "" }
               Row {
                 visible: (r.items || []).length > 0
                 anchors.right: parent.right
@@ -1173,27 +1195,86 @@ Panel {
             }
           }
 
-          // The search line: what was typed, with a caret, or what typing does
+          // The search field: a real one, holding the keyboard while it is on screen so typing anywhere lands in it (on
+          // home, typing comes here with its first letter); Up, Down, Return and Escape pass through to the panel, so
+          // the keyboard ring and the way back work as everywhere else. Escape clears it, × too.
           Component {
             id: searchC
             Item {
-              height: root.rowH + Style.space(6)
+              id: sf
+              height: root.rowH + Style.space(12)
+              readonly property string q: r.query || ""
+              // the panel's own key catcher, which takes the keyboard back when the field goes
+              property Item host: null
+              onQChanged: if (field.text !== q) field.text = q
+              Component.onCompleted: {
+                for (var p = parent; p; p = p.parent) if (p.objectName === "local-ai-keys") { host = p; break }
+                field.text = q
+                field.cursorPosition = q.length
+                root.focusLater(field)
+              }
+              Component.onDestruction: if (host && field.activeFocus) root.focusLater(host)
               Rectangle {
                 x: root.gutter
                 width: parent.width - 2 * root.gutter
                 height: parent.height
-                color: "transparent"
+                radius: 2
+                color: root.surface
                 border.width: 1
-                border.color: r.query ? root.ink : root.ruleTone
+                border.color: field.activeFocus ? Util.alpha(root.ink, 0.6) : root.ruleTone
+              }
+              Label {
+                id: searchIcon
+                x: root.gutter + Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.glyph("search")
+                color: field.text ? root.ink : root.labelTone
+              }
+              TextInput {
+                id: field
+                x: searchIcon.x + searchIcon.width + Style.space(10)
+                width: (clearIcon.visible ? clearIcon.x - Style.space(8) : parent.width - root.gutter - Style.space(10)) - x
+                anchors.verticalCenter: parent.verticalCenter
+                clip: true
+                color: root.ink
+                selectionColor: Util.alpha(root.ink, 0.3)
+                selectedTextColor: root.ink
+                selectByMouse: true
+                font.family: root.mono
+                font.pixelSize: Style.font.body
+                onTextEdited: root.search(text)
                 Label {
-                  x: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: parent.width - Style.space(16)
-                  elide: Text.ElideLeft
-                  text: r.query ? r.query + "▏" : "⌕  " + r.hint
-                  color: r.query ? root.ink : root.labelTone
+                  visible: !field.text
+                  x: Style.space(3)
+                  width: parent.width - x
+                  elide: Text.ElideRight
+                  text: r.hint || ""
+                  color: root.labelTone
                 }
               }
+              Label {
+                id: clearIcon
+                visible: !!field.text
+                anchors.right: parent.right
+                anchors.rightMargin: root.gutter + Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.glyph("clear")
+                color: root.valueTone
+                MouseArea { anchors.fill: parent; anchors.margins: -Style.space(6); cursorShape: Qt.PointingHandCursor; onClicked: { root.search(""); field.forceActiveFocus() } }
+              }
+            }
+          }
+
+          // The last line of a page: where what is on it came from, quiet
+          Component {
+            id: footC
+            Label {
+              leftPadding: root.gutter; rightPadding: root.gutter
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: r.text || ""
+              color: Util.alpha(root.labelTone, 0.7)
+              font.pixelSize: Style.font.caption
             }
           }
 

@@ -272,10 +272,15 @@ function catalog(s) {
   })
   return out
 }
-function matches(c, q) {
-  var hay = [c.name, c.title, c.quant, c.family, brief(c.format), c.engine, c.on, c.hw].join(" ").toLowerCase()
-  return q.split(/\s+/).every(function(w) { return hay.indexOf(w) >= 0 })
+// what a search finds a model by: its name, maker, build, engine and card, what it is good for, and what it can do in
+// the words people search for it with
+var CAN = { vision: "vision images sees multimodal", tools: "tools agents", reasoning: "thinking reasoning" }
+function words(c) {
+  var m = c.model || {}
+  return [c.name, c.title, c.quant, c.family, brief(c.format), c.engine, c.on, c.hw, m.goodFor || m.about || ""]
+    .concat(Object.keys(CAN).filter(function(k) { return c.caps && c.caps[k] }).map(function(k) { return CAN[k] })).join(" ").toLowerCase()
 }
+function matches(hay, q) { return q.split(/\s+/).every(function(w) { return hay.indexOf(w) >= 0 }) }
 // A model as two lines: its maker's mark, its name and build, what is special about it (best pick, fastest), and its
 // measured speed on the right; under them what it is to you: how smart, its context, its size and whether it is
 // here, what it can do. A model that runs says so in place of its speed, one that loads or downloads its progress.
@@ -420,29 +425,32 @@ function unoffered(s) {
   })
   return rows
 }
-// Get models: a search line (type anywhere) over every model, those here marked as such; without a search, every
-// model that fits and is not here yet, to download, then those this machine is too small for, and those tested only on
-// other cards so far. Each row opens in place to download, pin or see it.
+// Get models: a search field over every model, those on other cards too; without a search, every model that fits and is
+// not here yet, to download (or word that all of them are), then those this machine is too small for and those tested
+// only on other cards so far, each folded under its count. Each row opens in place to download, pin or see it.
 function modelsTab(s, ui) {
-  var all = catalog(s), q = (ui.query || "").trim().toLowerCase(), by = ui.sort || "smart"
-  var rows = [{ type: "search", query: ui.query || "", hint: "type to search " + all.length + (all.length === 1 ? " model" : " models") }]
+  var all = catalog(s), u = s.untested || [], q = (ui.query || "").trim().toLowerCase(), by = ui.sort || "smart"
+  var rows = [{ type: "search", query: ui.query || "", hint: "search " + (all.length + u.length) + " models: qwen, vision, coding\u2026" }]
   if (q) {
-    var hit = all.filter(function(c) { return matches(c, q) }).sort(function(a, b) { return (b.fits - a.fits) || sorter(by)(a, b) })
-    rows.push({ type: "sec", label: "MATCHES" })
-    return rows.concat(hit.length ? list(hit, ui) : [{ type: "links", note: "No model here matches \u201c" + ui.query.trim() + "\u201d. New ones arrive with Local AI updates.", items: [] }])
+    var hit = all.filter(function(c) { return matches(words(c), q) }).sort(function(a, b) { return (b.fits - a.fits) || sorter(by)(a, b) })
+    var far = u.filter(function(x) { return matches([x.name, x.family, quantOf(x), x.hf].concat(x.cards.map(cardLabel)).join(" ").toLowerCase(), q) })
+    if (hit.length) rows = rows.concat([{ type: "sec", label: hit.length + (hit.length === 1 ? " MATCH" : " MATCHES"), items: sortItems(by) }], list(hit, ui))
+    if (far.length) rows = rows.concat([{ type: "sec", label: "NOT YET TESTED ON THIS CARD" }], untestedRows(far, ui))
+    if (!hit.length && !far.length) rows.push({ type: "links", note: "Nothing matches \u201c" + ui.query.trim() + "\u201d. Try a maker (qwen, gemma), a size (27b) or what it does (vision, tools).", items: [] })
+    return rows
   }
   var get = all.filter(function(c) { return c.fits && !c.d && !here(c) && !(c.dl && c.dl.state === "download") }).sort(sorter(by))
   var big = all.filter(function(c) { return !c.fits && !c.d })
   var have = all.length - get.length - big.length
-  rows.push({ type: "sec", label: get.length ? "TO DOWNLOAD" : "NOTHING MORE TO DOWNLOAD", note: get.length ? "fits this machine" : "", items: get.length ? sortItems(by) : null })
-  rows = rows.concat(list(get, ui))
-  if (have) rows.push({ type: "field", icon: "disk", label: have + (have === 1 ? " model is" : " models are") + " on this machine", value: "home", action: "home" })
+  if (get.length) rows = rows.concat([{ type: "sec", label: "TO DOWNLOAD", note: "fits this machine", items: sortItems(by) }], list(get, ui))
+  else rows.push({ type: "links", items: [], chips: [have ? { icon: "check", text: (have === 1 ? "The one model that fits this machine is downloaded" : "All " + have + " that fit this machine are downloaded") }
+    : { text: "No model fits this machine yet; those too big for it say what they need." }] })
   if (big.length) {
-    rows.push({ type: "field", label: "too big for this machine", value: String(big.length), drop: true, open: ui.big, action: "big" })
+    rows.push({ type: "sec", label: "TOO BIG FOR THIS MACHINE", count: big.length, open: !!ui.big, action: "big" })
     if (ui.big) rows = rows.concat(list(big.sort(sorter(by)), ui))
   }
   rows = rows.concat(untested(s, ui))
-  if (s.catalog && s.catalog.commit) rows.push({ type: "banner", text: "models from the registry at " + s.catalog.commit.slice(0, 8) + (s.catalog.at ? " · checked " + ago(Date.parse(s.catalog.at) / 1000) : "") })
+  if (s.catalog && s.catalog.commit) rows.push({ type: "foot", text: "models from the registry at " + s.catalog.commit.slice(0, 8) + (s.catalog.at ? " \u00b7 checked " + ago(Date.parse(s.catalog.at) / 1000) : "") })
   return rows
 }
 // Models tested on other cards and none of these that would fit this machine: folded, never started from here, each
@@ -458,8 +466,10 @@ function cardLabel(id) {
 function untested(s, ui) {
   var u = s.untested || []
   if (!u.length) return []
-  var rows = [{ type: "field", label: "not yet tested on this card", value: String(u.length), drop: true, open: ui.untested, action: "untested" }]
-  if (!ui.untested) return rows
+  var rows = [{ type: "sec", label: "NOT YET TESTED ON THIS CARD", count: u.length, open: !!ui.untested, action: "untested" }]
+  return ui.untested ? rows.concat(untestedRows(u, ui)) : rows
+}
+function untestedRows(u, ui) {
   var out = []
   u.forEach(function(x) {
     var names = x.cards.map(cardLabel), where = names.slice(0, 2).join(", ") + (names.length > 2 ? " +" + (names.length - 2) : "")
@@ -470,7 +480,7 @@ function untested(s, ui) {
       items: [/^[a-z0-9][a-z0-9.-]*$/.test(x.id) ? { label: "In the registry ›", action: "url|" + REGISTRY + x.id + "/" } : null,
         x.hf ? { label: "Hugging Face ›", action: "url|https://huggingface.co/" + x.hf } : null].filter(Boolean) })
   })
-  return rows.concat(out)
+  return out
 }
 
 // Your lifetime as an activity grid: a column a week, a row a weekday, each day shaded in four steps by its tokens

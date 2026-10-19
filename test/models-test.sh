@@ -79,22 +79,22 @@ test('home: what runs as cards, then what is ready to start, the best pick when 
   const card = r.find(x => x.type === 'run');
   assert.deepEqual([card.primary.label, card.primary.action, card.swap, card.more, card.stop], ['Open pi', 'open|lfm.cpu', 'models', 'more|lfm.cpu', 'stop|lfm.cpu']);
 });
-test('get models: a search line, what fits and is not here to download, sorted by how smart; what is here a tab away; too big folded', () => {
+test('get models: a search field, what fits and is not here to download, sorted by how smart; too big and untested folded under their counts', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'cpu' ? {...k, models: [{...k.models[0], downloaded: true}]} : k),
     downloads: [{id: 'gemma.3090', state: 'download', detail: '3 of 20 GB', percent: 15}]};
   const r = tab(st);
   assert.deepEqual(r[0].items.map(t => t.label + (t.on ? '*' : '')), ['home', 'get models*']);
-  assert.equal(r[1].hint, 'type to search 6 models');
-  assert.deepEqual(sec(r), ['TO DOWNLOAD']);
+  assert.equal(r[1].hint, 'search 6 models: qwen, vision, coding…');
+  assert.deepEqual(sec(r), ['TO DOWNLOAD', 'TOO BIG FOR THIS MACHINE']);
   assert.deepEqual(r.find(x => x.type === 'sec').items.map(x => x.label + (x.on ? '*' : '')), ['smart*', 'fast', 'small']);
   assert.deepEqual(table(r), ['Qwen3.8-27B | EXL3 3 bpw | RTX 3090', 'Qwen3.8-27B | Q4_K_M | B70', 'Qwen3.6-35B-A3B | FP8 | 2× B70']);
   assert(r.filter(x => x.type === 'mrow').every(x => x.info.disk === 'download' && x.act.label === 'Download'));
-  assert.deepEqual(r.find(x => x.action === 'home').label, '2 models are on this machine');
   // the download under way and the model on disk are on home: the download's progress on the right and as a bar, Cancel in a click
   const h = home(st).filter(x => x.type === 'mrow');
   assert.deepEqual([h[0].title, h[0].right, h[0].progress, h[0].act.label], ['Gemma 4 26B A4B', '↓ 15%', 15, 'Cancel']);
   assert.deepEqual([h[1].title, h[1].info.disk, h[1].info.size], ['LFM2.5-2.6B', 'here', '14 GB']);
-  assert.equal(r.find(x => x.label === 'too big for this machine').value, '1');
+  const fold = r.find(x => x.label === 'TOO BIG FOR THIS MACHINE');
+  assert.deepEqual([fold.count, fold.open, fold.action], [1, false, 'big']);
   const big = tab(st, {big: true}).find(x => x.type === 'mrow' && x.title === 'Qwen3.8-Flash-Next');
   assert(big.dim && big.alert && !big.info);
   assert.deepEqual(big.meta, ['needs 75 GB RAM, you have 40']);
@@ -194,20 +194,26 @@ test('a card that shares the host memory offers Run alongside, within its share 
 test('models tested only on other cards are folded at the end, never startable, leading to the registry', () => {
   const st = {...s, untested: [{id: 'qwen3.8-flash-next', name: 'Qwen3.8-Flash-Next', family: 'qwen', aa: 39.8, quant: 'EXL3 2.05bpw', sizeGb: 62.8,
     hf: 'Qwen/Qwen3.8-Flash-Next', cards: ['RTX 3090', 'rtx-pro-6000-blackwell-96gb', 'RTX 5090']}]};
-  const f = tab(st).find(x => x.label === 'not yet tested on this card');
-  assert.deepEqual([f.value, f.action, f.drop], ['1', 'untested', true]);
+  const f = tab(st).find(x => x.label === 'NOT YET TESTED ON THIS CARD');
+  assert.deepEqual([f.count, f.action, f.open], [1, 'untested', false]);
+  // a search finds them too, by name or the cards they were tested on, never startable
+  assert.deepEqual(tab(st, {query: 'flash 5090'}).filter(x => x.type === 'mrow').map(x => [x.title, x.dim]), [['Qwen3.8-Flash-Next', true]]);
   const r = tab(st, {untested: true, open: 'u:qwen3.8-flash-next'});
   const row = r.find(x => x.type === 'mrow' && x.title === 'Qwen3.8-Flash-Next' && x.dim);
   assert.deepEqual([row.quant, row.right, row.meta], ['EXL3 2.05bpw', 'smart 40', ['63 GB', 'tested on RTX 3090, RTX PRO 6000 Blackwell +1']]);
   assert.deepEqual(opened(r).items.map(a => a.action), ['url|https://local.sybilsolutions.ai/models/qwen3.8-flash-next/', 'url|https://huggingface.co/Qwen/Qwen3.8-Flash-Next']);
   assert(!opened(r).items.some(a => /^(run|switch|download)\|/.test(a.action)));
 });
-test('search matches name, build, family, engine and hardware, every word; typing lands on the models tab', () => {
+test('search matches name, build, family, engine, hardware and what a model can do, every word', () => {
   assert.deepEqual(table(tab(s, {query: 'qwen b70'})), ['Qwen3.8-27B | Q4_K_M | B70', 'Qwen3.6-35B-A3B | FP8 | 2× B70']);
   assert.deepEqual(table(tab(s, {query: 'GEMMA'})), ['Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
   assert.deepEqual(table(tab(s, {query: 'tabbyapi'})), ['Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
   const none = tab(s, {query: 'mistral'});
-  assert(/No model here matches “mistral”/.test(none.find(x => x.type === 'links').note));
+  assert(/Nothing matches “mistral”/.test(none.find(x => x.type === 'links').note));
+  // what it can do, in the words people search with
+  const seeing = {...s, kinds: s.kinds.map(k => ({...k, models: k.models.map(x => x.id === 'gemma.3090' ? {...x, caps: {vision: true}} : x)}))};
+  assert.deepEqual(table(tab(seeing, {query: 'images'})), ['Gemma 4 26B A4B | EXL3 5.1 bpw | RTX 3090']);
+  assert.equal(tab(seeing, {query: 'images'}).find(x => x.type === 'sec').label, '1 MATCH');
 });
 test('a model page: its build in the top line, what the registry says of it, what it needs under details', () => {
   const st = {...s, kinds: s.kinds.map(k => k.hw === 'rtx-3090-24gb' ? {...k, models: k.models.map(x => x.id === 'gemma.3090'
@@ -233,7 +239,8 @@ test('a CPU-only machine, one where nothing fits, and one with only multi-card r
   assert.deepEqual(home(cpu).filter(x => x.type === 'mrow').map(x => x.title + ' | ' + x.quant), ['LFM2.5-2.6B | Q4_K_M']);
   const small = {...base, gpus: [s.gpus[0]], kinds: [{...s.kinds[0], models: [s.kinds[0].models[2]]}]};
   assert(/Nothing fits this machine yet/.test(home(small).find(x => x.type === 'links').note));
-  assert.equal(tab(small).find(x => x.label === 'too big for this machine').value, '1');
+  assert.equal(tab(small).find(x => x.label === 'TOO BIG FOR THIS MACHINE').count, 1);
+  assert(/No model fits this machine yet/.test(tab(small).find(x => x.type === 'links').chips[0].text));
   const pair = {...base, gpus: [s.gpus[1], {...s.gpus[2]}], kinds: [{...s.kinds[1], models: [], free: ['intel-xpu:0', 'intel-xpu:1'], taken: []}]};
   assert.deepEqual(table(home(pair)), ['Qwen3.6-35B-A3B | FP8 | 2× B70']);
 });
@@ -249,7 +256,7 @@ test('a stale NVIDIA device list is a small banner under this machine, its Fix r
   assert(r.indexOf(b) > r.findIndex(x => x.label === 'THIS MACHINE'));
   assert(!r.some(x => x.type === 'error'));
 });
-test('the registry line on the models tab is a small banner', () => {
+test('the registry line ends the models tab, quietly', () => {
   assert.equal(tab({...s, catalog: {commit: 'a9f394a7658d', at: ''}}).pop().text, 'models from the registry at a9f394a7');
 });
 test('the bar mark ripples while a download runs on its own', () => {

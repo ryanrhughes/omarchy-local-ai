@@ -16,6 +16,7 @@ This fork (ryanrhughes/omarchy-local-ai) reads its catalog from ryanrhughes/loca
 - What the registry says of a model on its page: what it is, what it is good for, when it was released, and how fast it ran on your card when tested (writing and reading, the date, lab or publisher).
 - Not yet tested on this card: a folded list of the models tested only on other cards that would fit this machine, each saying where, linking to the registry and Hugging Face; none can be started.
 - Downloads show their progress on their row, and ripple the bar mark.
+- Get models is for finding models: a real search field (click it, or type anywhere) over every model, those tested only on other cards too, by name, maker, size or what a model can do (vision, tools, coding); Return opens the first match, Escape or × clears it. Without a search it lists what fits and is not downloaded, or says all of it is, then what is too big and what is untested, each folded under its count.
 - Qwen3.6-35B-A3B NVFP4 on the RTX Spark N1X: 103 tok/s decode, 1,184 tok/s prefill, 256K context with MTP, gated on the owner's machine at memory 0.6.
 
 ### Fixed
